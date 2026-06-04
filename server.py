@@ -197,6 +197,9 @@ DSLIST_RESULTS_MAX_ROWS = 14
 DSLIST_CMD_SF_COL = 1
 
 # Dataset Browse/View/Edit panel layout
+DATASET_CMD_ROW = 2
+DATASET_CMD_SF_COL = 13
+DATASET_CMD_ADDR = DATASET_CMD_ROW * 80 + (DATASET_CMD_SF_COL + 1)
 DATASET_LINES_FIRST_ROW = 3
 DATASET_LINES_MAX_ROWS = 18
 DATASET_LINE_SF_COL = 6
@@ -293,6 +296,7 @@ def send_dataset_panel(
     mode: str,
     lines: list,
     page: int,
+    command: str = "",
     short_msg: str = None,
 ):
     """Send a simple ISPF-like dataset Browse/View/Edit panel for sequential datasets."""
@@ -311,11 +315,20 @@ def send_dataset_panel(
     page = max(0, min(page, total_pages - 1))
     start = page * DATASET_LINES_MAX_ROWS
 
-    _normal(buf, 1, 1, f"DSN . . : {dsn[:66]}")
-    _normal(buf, 1, 63, f"Page {page + 1:>2}/{total_pages:<2}")
+    _normal(buf, 1, 1, f"DSN . . : {dsn[:45]}")
 
     if short_msg:
-        _high(buf, 2, 1, short_msg[:78])
+        msg_text = short_msg[:27]
+        _high(buf, 1, 50, msg_text)
+    else:
+        _normal(buf, 1, 50, f"Scroll . Page {page + 1:>2}/{total_pages:<2}")
+
+    _normal(buf, DATASET_CMD_ROW, 1, "Command ===>")
+    _sba(buf, DATASET_CMD_ROW, DATASET_CMD_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{command[:8]:<8}")
+    _sba_sf(buf, DATASET_CMD_ROW, DATASET_CMD_SF_COL + 9, protected=True)
 
     for i in range(DATASET_LINES_MAX_ROWS):
         row = DATASET_LINES_FIRST_ROW + i
@@ -333,12 +346,15 @@ def send_dataset_panel(
             _normal(buf, row, DATASET_LINE_SF_COL + 1, f"{text:<{DATASET_LINE_WIDTH}}")
 
     if mode == "E":
-        _normal(buf, 22, 1, "PF3=End/Save  PF7=Up  PF8=Down")
+        _normal(buf, 22, 1, "Commands: X=Exit SCROLL UP/DOWN  PF3=Save  PF7=Up  PF8=Down")
         buf.append(SBA)
         buf.extend(encode_pack_addr(DATASET_LINES_FIRST_ROW, DATASET_LINE_SF_COL + 1))
         buf.append(IC)
     else:
-        _normal(buf, 22, 1, "PF3=End  PF7=Up  PF8=Down")
+        _normal(buf, 22, 1, "Commands: X=Exit SCROLL UP/DOWN  PF3=End  PF7=Up  PF8=Down")
+        buf.append(SBA)
+        buf.extend(encode_pack_addr(DATASET_CMD_ROW, DATASET_CMD_SF_COL + 1))
+        buf.append(IC)
 
     _high(buf, 23, 0, "-" * 79)
     buf.extend([IAC, EOR])
@@ -640,7 +656,8 @@ def send_ispf_dslist(client_socket, level: str = "", rows=None, short_msg: str =
         recfm = str(ds.get("recfm", ""))[:5]
         lrecl = str(ds.get("lrecl", ""))[:5]
         mode  = ds.get("content_mode", "text").upper()[:6]
-        _normal(buf, row, 1, f"     {dsn:<35}  {org:<3}  {recfm:<5} {lrecl:>5}  {mode:<6}")
+        # Keep cols 1-3 reserved for line command input and separator.
+        _normal(buf, row, 4, f"  {dsn:<35}  {org:<3}  {recfm:<5} {lrecl:>5}  {mode:<6}")
 
     # Row 22: usage hint; Row 23: bottom border
     _normal(buf, 22, 1, "Enter DSN pattern, or line cmd B/V/E. X or PF3 to return.")
@@ -957,6 +974,7 @@ def handle_client(client_socket, addr):
                                 dsn = _normalize_dsn(selected.get("dsn", ""))
                                 page = 0
                                 ds_msg = None
+                                ds_cmd = ""
                                 while True:
                                     send_dataset_panel(
                                         client_socket,
@@ -964,6 +982,7 @@ def handle_client(client_socket, addr):
                                         mode=selected_cmd,
                                         lines=lines,
                                         page=page,
+                                        command=ds_cmd,
                                         short_msg=ds_msg,
                                     )
                                     ds_result = read_client_input(client_socket)
@@ -971,15 +990,40 @@ def handle_client(client_socket, addr):
                                         return
                                     ds_aid, ds_fields = ds_result
                                     ds_aid_str = aid_to_string(ds_aid)
+                                    ds_cmd = ds_fields.get(DATASET_CMD_ADDR, "").strip().upper()
+
+                                    if ds_aid_str == "Enter" and ds_cmd in {"X", "END", "CANCEL", "EXIT"}:
+                                        if selected_cmd == "E":
+                                            save_error = save_dataset_lines(selected, lines)
+                                            if save_error:
+                                                ds_msg = save_error
+                                                continue
+                                            dslist_msg = f"{dsn} SAVED"
+                                        else:
+                                            dslist_msg = None
+                                        break
+
+                                    # Handle scroll commands
+                                    if ds_aid_str == "Enter" and ds_cmd in {"UP", "DOWN", "SCROLL UP", "SCROLL DOWN", "S", "S UP", "S DOWN"}:
+                                        if "DOWN" in ds_cmd or "D" in ds_cmd:
+                                            max_page = max(0, (len(lines) - 1) // DATASET_LINES_MAX_ROWS)
+                                            page = min(max_page, page + 1)
+                                        else:
+                                            page = max(0, page - 1)
+                                        ds_msg = None
+                                        ds_cmd = ""
+                                        continue
 
                                     if ds_aid_str in ("PF7",):
                                         page = max(0, page - 1)
                                         ds_msg = None
+                                        ds_cmd = ""
                                         continue
                                     if ds_aid_str in ("PF8",):
                                         max_page = max(0, (len(lines) - 1) // DATASET_LINES_MAX_ROWS)
                                         page = min(max_page, page + 1)
                                         ds_msg = None
+                                        ds_cmd = ""
                                         continue
                                     if ds_aid_str in ("PF3", "PF15"):
                                         if selected_cmd == "E":
@@ -1002,8 +1046,13 @@ def handle_client(client_socket, addr):
                                                     lines.extend([""] * (idx - len(lines) + 1))
                                                 lines[idx] = ds_fields.get(addr, "")[:DATASET_LINE_WIDTH]
                                         ds_msg = "CHANGES STAGED - PF3 TO SAVE"
+                                        ds_cmd = ""
+                                    elif ds_aid_str == "Enter" and ds_cmd:
+                                        ds_msg = f"UNKNOWN COMMAND: {ds_cmd}"
+                                        ds_cmd = ""
                                     else:
                                         ds_msg = "USE PF7/PF8 TO SCROLL, PF3 TO EXIT"
+                                        ds_cmd = ""
                                 continue
 
                             if not dl_entered:
