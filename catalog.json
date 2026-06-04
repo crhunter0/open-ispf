@@ -1,0 +1,76 @@
+{
+  "datasets": [
+    {
+      "dsn": "IBMUSER.CLIST",
+      "path": "data/IBMUSER/CLIST",
+      "org": "PO",
+      "recfm": "FB",
+      "lrecl": 80,
+      "content_mode": "text",
+      "text_ccsid": "cp037"
+    },
+    {
+      "dsn": "IBMUSER.JCLLIB",
+      "path": "data/IBMUSER/JCLLIB",
+      "org": "PO",
+      "recfm": "FB",
+      "lrecl": 80,
+      "content_mode": "text",
+      "text_ccsid": "cp037"
+    },
+    {
+      "dsn": "IBMUSER.LOAD",
+      "path": "data/IBMUSER/LOAD",
+      "org": "PO",
+      "recfm": "U",
+      "lrecl": 0,
+      "content_mode": "binary",
+      "text_ccsid": "cp037"
+    },
+    {
+      "dsn": "IBMUSER.PROCLIB",
+      "path": "data/IBMUSER/PROCLIB",
+      "org": "PO",
+      "recfm": "FB",
+      "lrecl": 80,
+      "content_mode": "text",
+      "text_ccsid": "cp037"
+    },
+    {
+      "dsn": "TESTUSER.DATA",
+      "path": "data/TESTUSER/DATA.dat",
+      "org": "PS",
+      "recfm": "FB",
+      "lrecl": 80,
+      "content_mode": "binary",
+      "text_ccsid": "cp037"
+    },
+    {
+      "dsn": "TESTUSER.JCLLIB",
+      "path": "data/TESTUSER/JCLLIB",
+      "org": "PO",
+      "recfm": "FB",
+      "lrecl": 80,
+      "content_mode": "text",
+      "text_ccsid": "cp037"
+    },
+    {
+      "dsn": "SYS1.PARMLIB",
+      "path": "data/SYS1/PARMLIB",
+      "org": "PO",
+      "recfm": "FB",
+      "lrecl": 80,
+      "content_mode": "text",
+      "text_ccsid": "cp037"
+    },
+    {
+      "dsn": "SYS1.PROCLIB",
+      "path": "data/SYS1/PROCLIB",
+      "org": "PO",
+      "recfm": "FB",
+      "lrecl": 80,
+      "content_mode": "text",
+      "text_ccsid": "cp037"
+    }
+  ]
+}
