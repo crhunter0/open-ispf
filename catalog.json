@@ -71,6 +71,15 @@
       "lrecl": 80,
       "content_mode": "text",
       "text_ccsid": "cp037"
+    },
+        {
+      "dsn": "GP5CRH.DATA",
+      "path": "data/GP5CRH/DATA.dat",
+      "org": "PS",
+      "recfm": "FB",
+      "lrecl": 80,
+      "content_mode": "text",
+      "text_ccsid": "cp037"
     }
   ]
 }

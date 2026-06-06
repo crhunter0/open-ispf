@@ -5,6 +5,7 @@ import fnmatch
 from pathlib import Path
 from datetime import datetime
 from enum import Enum
+from ispf_utility_handlers import UtilityActions, UtilityLayout, handle_utility_option
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -165,7 +166,7 @@ def _normal(buf: bytearray, row: int, col: int, s: str):
 
 # Credentials — keys are uppercase userids
 _CREDENTIALS = {
-    "IBMUSER": "SYS1",
+    "GP5CRH": "TSYS",
     "TESTUSER": "RACF",
 }
 # Passwords are stored and compared uppercase (default RACF behavior without MIXEDCASE option)
@@ -845,6 +846,34 @@ def tn3270_negotiate(client_socket):
     print("Negotiation complete: binary={}, eor={}, term={}".format(got_binary, got_eor, got_term))
 
 
+UTILITY_LAYOUT = UtilityLayout(
+    ispf_option_addr=ISPF_OPTION_ADDR,
+    dslist_level_addr=DSLIST_LEVEL_ADDR,
+    dslist_results_first_row=DSLIST_RESULTS_FIRST_ROW,
+    dslist_results_max_rows=DSLIST_RESULTS_MAX_ROWS,
+    dslist_cmd_sf_col=DSLIST_CMD_SF_COL,
+    dataset_cmd_addr=DATASET_CMD_ADDR,
+    dataset_lines_first_row=DATASET_LINES_FIRST_ROW,
+    dataset_lines_max_rows=DATASET_LINES_MAX_ROWS,
+    dataset_line_sf_col=DATASET_LINE_SF_COL,
+    dataset_line_width=DATASET_LINE_WIDTH,
+)
+
+
+UTILITY_ACTIONS = UtilityActions(
+    send_ispf_dslist=send_ispf_dslist,
+    send_dataset_panel=send_dataset_panel,
+    read_client_input=read_client_input,
+    aid_to_string=aid_to_string,
+    load_catalog=load_catalog,
+    search_catalog=search_catalog,
+    is_pds_like=_is_pds_like,
+    load_dataset_lines=load_dataset_lines,
+    save_dataset_lines=save_dataset_lines,
+    normalize_dsn=_normalize_dsn,
+)
+
+
 def handle_client(client_socket, addr):
     print(f"Connection from {addr}")
     tn3270_negotiate(client_socket)
@@ -915,166 +944,15 @@ def handle_client(client_socket, addr):
                     if utils_option == "X" or utils_aid_str in ("PF3", "PF15"):
                         break
 
-                    if utils_option == "4":
-                        dslist_level = ""
-                        dslist_rows  = []
-                        dslist_msg   = None
-                        catalog      = load_catalog()
-                        while True:
-                            send_ispf_dslist(
-                                client_socket,
-                                level=dslist_level,
-                                rows=dslist_rows,
-                                short_msg=dslist_msg,
-                            )
-                            dl_result = read_client_input(client_socket)
-                            if dl_result is None:
-                                return
-                            dl_aid, dl_fields = dl_result
-                            print(f"AID={hex(dl_aid)}, fields={dl_fields}")
-
-                            dl_aid_str = aid_to_string(dl_aid)
-                            dl_entered = dl_fields.get(DSLIST_LEVEL_ADDR, "").strip().upper()
-
-                            if dl_entered == "X" or dl_aid_str in ("PF3", "PF15"):
-                                break
-
-                            # Standard DSLIST line commands (B/V/E), one command at a time.
-                            selected = None
-                            selected_cmd = None
-                            cmd_count = 0
-                            for i, ds in enumerate(dslist_rows[:DSLIST_RESULTS_MAX_ROWS]):
-                                cmd_addr = (DSLIST_RESULTS_FIRST_ROW + i) * 80 + (DSLIST_CMD_SF_COL + 1)
-                                cmd = dl_fields.get(cmd_addr, "").strip().upper()
-                                if cmd:
-                                    cmd_count += 1
-                                    if cmd in {"B", "V", "E"} and selected is None:
-                                        selected = ds
-                                        selected_cmd = cmd
-                                    elif cmd not in {"B", "V", "E"}:
-                                        selected = None
-                                        selected_cmd = None
-                                        dslist_msg = f"INVALID LINE CMD: {cmd} (USE B, V, OR E)"
-                                        break
-
-                            if selected is not None:
-                                if cmd_count > 1:
-                                    dslist_msg = "ENTER ONLY ONE LINE COMMAND"
-                                    continue
-
-                                if _is_pds_like(selected):
-                                    dslist_msg = "PDS SUPPORT NOT IMPLEMENTED YET"
-                                    continue
-
-                                lines, load_error = load_dataset_lines(selected)
-                                if load_error:
-                                    dslist_msg = load_error
-                                    continue
-
-                                dsn = _normalize_dsn(selected.get("dsn", ""))
-                                page = 0
-                                ds_msg = None
-                                ds_cmd = ""
-                                while True:
-                                    send_dataset_panel(
-                                        client_socket,
-                                        dsn=dsn,
-                                        mode=selected_cmd,
-                                        lines=lines,
-                                        page=page,
-                                        command=ds_cmd,
-                                        short_msg=ds_msg,
-                                    )
-                                    ds_result = read_client_input(client_socket)
-                                    if ds_result is None:
-                                        return
-                                    ds_aid, ds_fields = ds_result
-                                    ds_aid_str = aid_to_string(ds_aid)
-                                    ds_cmd = ds_fields.get(DATASET_CMD_ADDR, "").strip().upper()
-
-                                    if ds_aid_str == "Enter" and ds_cmd in {"X", "END", "CANCEL", "EXIT"}:
-                                        if selected_cmd == "E":
-                                            save_error = save_dataset_lines(selected, lines)
-                                            if save_error:
-                                                ds_msg = save_error
-                                                continue
-                                            dslist_msg = f"{dsn} SAVED"
-                                        else:
-                                            dslist_msg = None
-                                        break
-
-                                    # Handle scroll commands
-                                    if ds_aid_str == "Enter" and ds_cmd in {"UP", "DOWN", "SCROLL UP", "SCROLL DOWN", "S", "S UP", "S DOWN"}:
-                                        if "DOWN" in ds_cmd or "D" in ds_cmd:
-                                            max_page = max(0, (len(lines) - 1) // DATASET_LINES_MAX_ROWS)
-                                            page = min(max_page, page + 1)
-                                        else:
-                                            page = max(0, page - 1)
-                                        ds_msg = None
-                                        ds_cmd = ""
-                                        continue
-
-                                    if ds_aid_str in ("PF7",):
-                                        page = max(0, page - 1)
-                                        ds_msg = None
-                                        ds_cmd = ""
-                                        continue
-                                    if ds_aid_str in ("PF8",):
-                                        max_page = max(0, (len(lines) - 1) // DATASET_LINES_MAX_ROWS)
-                                        page = min(max_page, page + 1)
-                                        ds_msg = None
-                                        ds_cmd = ""
-                                        continue
-                                    if ds_aid_str in ("PF3", "PF15"):
-                                        if selected_cmd == "E":
-                                            save_error = save_dataset_lines(selected, lines)
-                                            if save_error:
-                                                ds_msg = save_error
-                                                continue
-                                            dslist_msg = f"{dsn} SAVED"
-                                        else:
-                                            dslist_msg = None
-                                        break
-
-                                    if selected_cmd == "E" and ds_aid_str == "Enter":
-                                        start_idx = page * DATASET_LINES_MAX_ROWS
-                                        for i in range(DATASET_LINES_MAX_ROWS):
-                                            addr = (DATASET_LINES_FIRST_ROW + i) * 80 + (DATASET_LINE_SF_COL + 1)
-                                            if addr in ds_fields:
-                                                idx = start_idx + i
-                                                if idx >= len(lines):
-                                                    lines.extend([""] * (idx - len(lines) + 1))
-                                                lines[idx] = ds_fields.get(addr, "")[:DATASET_LINE_WIDTH]
-                                        ds_msg = "CHANGES STAGED - PF3 TO SAVE"
-                                        ds_cmd = ""
-                                    elif ds_aid_str == "Enter" and ds_cmd:
-                                        ds_msg = f"UNKNOWN COMMAND: {ds_cmd}"
-                                        ds_cmd = ""
-                                    else:
-                                        ds_msg = "USE PF7/PF8 TO SCROLL, PF3 TO EXIT"
-                                        ds_cmd = ""
-                                continue
-
-                            if not dl_entered:
-                                dslist_msg = "ENTER DSNAME LEVEL PATTERN (EX: IBMUSER.*)"
-                                continue
-
-                            dslist_level = dl_entered
-                            dslist_rows  = search_catalog(catalog, dslist_level)
-                            if dslist_rows:
-                                dslist_msg = f"{len(dslist_rows)} DATA SET(S) LISTED"
-                            else:
-                                dslist_msg = f"NO DATA SETS FOUND FOR {dslist_level}"
-                        utils_msg = None
-
-                    else:
-                        valid_utils_opts = {str(i) for i in range(1, 15)}
-                        if utils_option in valid_utils_opts:
-                            utils_msg = f"UTILITY {utils_option} NOT YET IMPLEMENTED"
-                        elif utils_option:
-                            utils_msg = f"INVALID OPTION: {utils_option}"
-                        else:
-                            utils_msg = None
+                    utility_result = handle_utility_option(
+                        option=utils_option,
+                        client_socket=client_socket,
+                        actions=UTILITY_ACTIONS,
+                        layout=UTILITY_LAYOUT,
+                    )
+                    if utility_result.disconnect:
+                        return
+                    utils_msg = utility_result.message
 
                 short_msg = None
             elif option in valid_opts:
