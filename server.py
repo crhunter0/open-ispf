@@ -198,6 +198,9 @@ DSLIST_RESULTS_MAX_ROWS = 14
 DSLIST_CMD_SF_COL = 1
 
 # Dataset Browse/View/Edit panel layout
+DATASET_SCROLL_ROW = 1
+DATASET_SCROLL_SF_COL = 60
+DATASET_SCROLL_ADDR = DATASET_SCROLL_ROW * 80 + (DATASET_SCROLL_SF_COL + 1)
 DATASET_CMD_ROW = 2
 DATASET_CMD_SF_COL = 13
 DATASET_CMD_ADDR = DATASET_CMD_ROW * 80 + (DATASET_CMD_SF_COL + 1)
@@ -291,6 +294,25 @@ def save_dataset_lines(entry: dict, lines: list) -> str:
     return None
 
 
+def _dataset_cols_ruler(width: int = DATASET_LINE_WIDTH) -> str:
+    ruler = []
+    for offset in range(1, width + 1):
+        if offset % 10 == 0:
+            ruler.append(str((offset // 10) % 10))
+        elif offset % 5 == 0:
+            ruler.append("+")
+        else:
+            ruler.append("-")
+    return "".join(ruler)
+
+
+def _dataset_hex_line(text: str) -> str:
+    encoded = text[:DATASET_LINE_WIDTH].ljust(DATASET_LINE_WIDTH).encode(
+        STANDARD_TEXT_CCSID, errors="replace"
+    )
+    return " ".join(f"{byte:02X}" for byte in encoded[:24])
+
+
 def send_dataset_panel(
     client_socket,
     dsn: str,
@@ -298,6 +320,9 @@ def send_dataset_panel(
     lines: list,
     page: int,
     command: str = "",
+    scroll: str = "PAGE",
+    show_cols: bool = False,
+    hex_mode: bool = False,
     short_msg: str = None,
 ):
     """Send a simple ISPF-like dataset Browse/View/Edit panel for sequential datasets."""
@@ -312,17 +337,20 @@ def send_dataset_panel(
     border = "-" * pad + inner + "-" * (79 - pad - len(inner))
     _high(buf, 0, 0, border)
 
-    total_pages = max(1, (len(lines) + DATASET_LINES_MAX_ROWS - 1) // DATASET_LINES_MAX_ROWS)
+    data_row_start = DATASET_LINES_FIRST_ROW + (1 if show_cols else 0)
+    rows_per_record = 2 if hex_mode else 1
+    records_per_page = max(1, DATASET_LINES_MAX_ROWS // rows_per_record)
+    total_pages = max(1, (len(lines) + records_per_page - 1) // records_per_page)
     page = max(0, min(page, total_pages - 1))
-    start = page * DATASET_LINES_MAX_ROWS
+    start = page * records_per_page
 
     _normal(buf, 1, 1, f"DSN . . : {dsn[:45]}")
-
-    if short_msg:
-        msg_text = short_msg[:27]
-        _high(buf, 1, 50, msg_text)
-    else:
-        _normal(buf, 1, 50, f"Scroll . Page {page + 1:>2}/{total_pages:<2}")
+    _normal(buf, DATASET_SCROLL_ROW, 50, "Scroll ===>")
+    _sba(buf, DATASET_SCROLL_ROW, DATASET_SCROLL_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{scroll[:4].upper():<4}")
+    _sba_sf(buf, DATASET_SCROLL_ROW, DATASET_SCROLL_SF_COL + 5, protected=True)
 
     _normal(buf, DATASET_CMD_ROW, 1, "Command ===>")
     _sba(buf, DATASET_CMD_ROW, DATASET_CMD_SF_COL)
@@ -331,8 +359,11 @@ def send_dataset_panel(
     _text(buf, f"{command[:8]:<8}")
     _sba_sf(buf, DATASET_CMD_ROW, DATASET_CMD_SF_COL + 9, protected=True)
 
-    for i in range(DATASET_LINES_MAX_ROWS):
-        row = DATASET_LINES_FIRST_ROW + i
+    if show_cols:
+        _normal(buf, DATASET_LINES_FIRST_ROW, 4, _dataset_cols_ruler(DATASET_LINE_WIDTH))
+
+    for i in range(records_per_page):
+        row = data_row_start + (i * rows_per_record)
         text = ""
         if start + i < len(lines):
             text = lines[start + i][:DATASET_LINE_WIDTH]
@@ -346,17 +377,27 @@ def send_dataset_panel(
         else:
             _normal(buf, row, DATASET_LINE_SF_COL + 1, f"{text:<{DATASET_LINE_WIDTH}}")
 
+        if hex_mode:
+            _normal(buf, row + 1, DATASET_LINE_SF_COL + 1, f"{_dataset_hex_line(text):<78}")
+
     if mode == "E":
-        _normal(buf, 22, 1, "Commands: X=Exit SCROLL UP/DOWN  PF3=Save  PF7=Up  PF8=Down")
         buf.append(SBA)
-        buf.extend(encode_pack_addr(DATASET_LINES_FIRST_ROW, DATASET_LINE_SF_COL + 1))
+        buf.extend(encode_pack_addr(data_row_start, DATASET_LINE_SF_COL + 1))
         buf.append(IC)
     else:
-        _normal(buf, 22, 1, "Commands: X=Exit SCROLL UP/DOWN  PF3=End  PF7=Up  PF8=Down")
         buf.append(SBA)
         buf.extend(encode_pack_addr(DATASET_CMD_ROW, DATASET_CMD_SF_COL + 1))
         buf.append(IC)
 
+    footer_text = (
+        "Commands: X=Exit COLS HEX SCROLL PAGE/CSR  PF3=Save  PF7=Up  PF8=Down"
+        if mode == "E"
+        else "Commands: X=Exit COLS HEX SCROLL PAGE/CSR  PF3=End  PF7=Up  PF8=Down"
+    )
+    if short_msg:
+        footer_text = f"{footer_text}  {short_msg}"[:79]
+
+    _normal(buf, 22, 1, footer_text)
     _high(buf, 23, 0, "-" * 79)
     buf.extend([IAC, EOR])
     print("TX:", binascii.hexlify(buf))
@@ -725,10 +766,16 @@ def read_client_input(client_socket):
     aid = buffer[0]
     print(f"AID: {aid_to_string(aid)}")
 
+    if len(buffer) < 3:
+        return None
+
+    cursor_addr = ((buffer[1] & 0x3F) << 6) | (buffer[2] & 0x3F)
+    print(f"Cursor address: {cursor_addr}")
+
     SBA_ORD = 0x11
     SF_ORD = 0x1D
     results = {}
-    i = 1
+    i = 3
     while i < len(buffer):
         if buffer[i] == SBA_ORD and i + 2 < len(buffer):
             addr_hi, addr_lo = buffer[i + 1], buffer[i + 2]
@@ -744,7 +791,7 @@ def read_client_input(client_socket):
         else:
             i += 1
 
-    return aid, results
+    return aid, cursor_addr, results
 
 
 def tn3270_negotiate(client_socket):
@@ -852,6 +899,7 @@ UTILITY_LAYOUT = UtilityLayout(
     dslist_results_first_row=DSLIST_RESULTS_FIRST_ROW,
     dslist_results_max_rows=DSLIST_RESULTS_MAX_ROWS,
     dslist_cmd_sf_col=DSLIST_CMD_SF_COL,
+    dataset_scroll_addr=DATASET_SCROLL_ADDR,
     dataset_cmd_addr=DATASET_CMD_ADDR,
     dataset_lines_first_row=DATASET_LINES_FIRST_ROW,
     dataset_lines_max_rows=DATASET_LINES_MAX_ROWS,
@@ -888,7 +936,7 @@ def handle_client(client_socket, addr):
             result = read_client_input(client_socket)
             if result is None:
                 return
-            aid, fields = result
+            aid, cursor_addr, fields = result
             print(f"AID={hex(aid)}, fields={fields}")
 
             aid_str = aid_to_string(aid)
@@ -917,7 +965,7 @@ def handle_client(client_socket, addr):
             result = read_client_input(client_socket)
             if result is None:
                 return
-            aid, fields = result
+            aid, cursor_addr, fields = result
             print(f"AID={hex(aid)}, fields={fields}")
 
             aid_str = aid_to_string(aid)
@@ -935,7 +983,7 @@ def handle_client(client_socket, addr):
                     utils_result = read_client_input(client_socket)
                     if utils_result is None:
                         return
-                    utils_aid, utils_fields = utils_result
+                    utils_aid, utils_cursor_addr, utils_fields = utils_result
                     print(f"AID={hex(utils_aid)}, fields={utils_fields}")
 
                     utils_aid_str = aid_to_string(utils_aid)

@@ -9,6 +9,7 @@ class UtilityLayout:
     dslist_results_first_row: int
     dslist_results_max_rows: int
     dslist_cmd_sf_col: int
+    dataset_scroll_addr: int
     dataset_cmd_addr: int
     dataset_lines_first_row: int
     dataset_lines_max_rows: int
