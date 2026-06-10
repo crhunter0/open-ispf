@@ -91,7 +91,12 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
             page = 0
             ds_msg = None
             ds_cmd = ""
+            pending_copy_source = None
             while True:
+                line_cmd_overrides = {}
+                if pending_copy_source is not None:
+                    line_cmd_overrides[pending_copy_source] = "C"
+
                 actions.send_dataset_panel(
                     client_socket,
                     dsn=dsn,
@@ -104,6 +109,7 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
                     hex_mode=dslist_hex_mode,
                     lrecl=selected.get("lrecl", layout.dataset_line_width),
                     short_msg=ds_msg,
+                    line_cmd_overrides=line_cmd_overrides,
                 )
                 ds_result = actions.read_client_input(client_socket)
                 if ds_result is None:
@@ -121,9 +127,11 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
                     ds_cmd = ds_scroll
 
                 if ds_scroll in {"PAGE", "CSR"} and not ds_cmd:
+                    # Do not short-circuit Enter here. The scroll field is
+                    # prefilled (PAGE/CSR), and users may have entered row
+                    # commands or data edits without a command-line value.
                     ds_msg = None
                     ds_cmd = ""
-                    continue
 
                 cmd_parts = ds_cmd.split()
                 cmd_root = cmd_parts[0] if cmd_parts else ""
@@ -202,7 +210,7 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
                         rows_per_record,
                         records_per_page,
                     )
-                    max_page = max(0, (len(lines) - 1) // records_per_page)
+                    max_page = max(0, len(lines) - records_per_page)
                     if "DOWN" in ds_cmd or ds_cmd.endswith("D"):
                         page = min(max_page, page + scroll_amount)
                     else:
@@ -241,7 +249,7 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
                         rows_per_record,
                         records_per_page,
                     )
-                    max_page = max(0, (len(lines) - 1) // records_per_page)
+                    max_page = max(0, len(lines) - records_per_page)
                     page = min(max_page, page + scroll_amount)
                     ds_msg = None
                     ds_cmd = ""
@@ -258,23 +266,163 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
                     break
 
                 if selected_cmd == "E" and ds_aid_str == "Enter":
+                    def _overlay_field(start_addr: int, width: int, seed: str) -> str:
+                        merged = list((seed or "").ljust(width)[:width])
+                        end_addr = start_addr + width
+                        for addr, value in ds_fields.items():
+                            if not isinstance(addr, int):
+                                continue
+                            fragment = str(value)
+                            frag_start = addr
+                            frag_end = addr + len(fragment)
+                            if frag_end <= start_addr or frag_start >= end_addr:
+                                continue
+
+                            overlap_start = max(start_addr, frag_start)
+                            overlap_end = min(end_addr, frag_end)
+                            src_offset = overlap_start - frag_start
+                            dst_offset = overlap_start - start_addr
+                            segment = fragment[src_offset : src_offset + (overlap_end - overlap_start)]
+                            for j, ch in enumerate(segment):
+                                merged[dst_offset + j] = ch
+
+                        return "".join(merged)
+
                     data_row_start, rows_per_record, records_per_page = _dataset_display_geometry(
                         layout,
                         dslist_show_cols,
                         dslist_hex_mode,
                     )
-                    start_idx = page * records_per_page
+                    start_idx = page
+                    prefix_width = 6
+                    line_cmds = []
+                    invalid_line_cmd = None
+                    edited_rows = []
                     for i in range(records_per_page):
                         row = data_row_start + (i * rows_per_record)
                         if dslist_hex_mode:
                             row += 3
-                        addr = row * 80 + layout.dataset_line_sf_col
-                        if addr in ds_fields:
-                            idx = start_idx + i
+
+                        row_idx = start_idx + i
+                        prefix_start = row * 80
+                        text_start = row * 80 + (layout.dataset_edit_text_sf_col + 1)
+
+                        current_line = lines[row_idx] if row_idx < len(lines) else ""
+                        default_seq = f"{row_idx + 1:06d}"
+                        prefix_seed = default_seq
+                        if pending_copy_source == row_idx:
+                            prefix_seed = "C"
+                        raw_prefix = _overlay_field(prefix_start, prefix_width, prefix_seed)
+                        cmd_value = raw_prefix.upper()
+
+                        # Prefix field doubles as editable sequence area. Accept
+                        # I/D/R typed in any position of the 6-char field while
+                        # still rejecting ambiguous alpha content.
+                        normalized = cmd_value.strip()
+                        alpha_chars = [ch for ch in normalized if ch.isalpha()]
+                        parsed_line_cmd = None
+
+                        if normalized and normalized != prefix_seed.strip().upper():
+                            if not alpha_chars:
+                                # User edited only sequence digits.
+                                parsed_line_cmd = None
+                            elif len(alpha_chars) == 1 and alpha_chars[0] in {"I", "D", "R", "C", "A", "B"}:
+                                parsed_line_cmd = alpha_chars[0]
+                            else:
+                                invalid_line_cmd = normalized
+                                break
+
+                        if parsed_line_cmd:
+                            line_cmds.append((row_idx, parsed_line_cmd))
+
+                        text_seed = current_line[: layout.dataset_edit_text_width]
+                        merged_text = _overlay_field(text_start, layout.dataset_edit_text_width, text_seed)
+                        edited_rows.append((row_idx, merged_text[: layout.dataset_edit_text_width]))
+
+                    if invalid_line_cmd:
+                        ds_msg = f"INVALID LINE CMD: {invalid_line_cmd}"
+                    elif line_cmds:
+                        cmd_types = {cmd for _, cmd in line_cmds}
+                        has_copy_cmd = any(cmd in {"C", "A", "B"} for _, cmd in line_cmds)
+                        has_direct_cmd = any(cmd in {"I", "D", "R"} for _, cmd in line_cmds)
+
+                        if has_copy_cmd and has_direct_cmd:
+                            ds_msg = "DO NOT MIX C/A/B WITH I/D/R"
+                        else:
+                            # Apply staged text edits first so R duplicates what
+                            # the user currently sees on screen.
+                            for idx, text_value in edited_rows:
+                                if idx >= len(lines):
+                                    lines.extend([""] * (idx - len(lines) + 1))
+                                lines[idx] = text_value
+
+                            if has_copy_cmd:
+                                c_rows = sorted({idx for idx, cmd in line_cmds if cmd == "C"})
+                                target_rows = [(idx, cmd) for idx, cmd in line_cmds if cmd in {"A", "B"}]
+
+                                if len(c_rows) > 1:
+                                    ds_msg = "ENTER ONLY ONE C LINE COMMAND"
+                                elif len(target_rows) > 1:
+                                    ds_msg = "ENTER ONLY ONE A OR B TARGET"
+                                else:
+                                    if c_rows:
+                                        pending_copy_source = c_rows[0]
+
+                                    if target_rows:
+                                        target_idx, target_cmd = target_rows[0]
+                                        if pending_copy_source is None:
+                                            ds_msg = "ENTER C BEFORE A OR B"
+                                        elif not (0 <= pending_copy_source < len(lines)):
+                                            pending_copy_source = None
+                                            ds_msg = "COPY SOURCE NO LONGER VALID"
+                                        else:
+                                            source_text = lines[pending_copy_source]
+                                            insert_at = target_idx if target_cmd == "B" else target_idx + 1
+                                            insert_at = max(0, min(insert_at, len(lines)))
+                                            lines.insert(insert_at, source_text)
+                                            pending_copy_source = None
+                                            ds_msg = "1 COPIED"
+                                    else:
+                                        ds_msg = "C MARKED - ENTER A OR B"
+                            else:
+                                if len(cmd_types) > 1:
+                                    ds_msg = "USE ONE LINE CMD TYPE AT A TIME"
+                                else:
+                                    cmd_type = next(iter(cmd_types))
+                                    if cmd_type == "D":
+                                        deletes = sorted({idx for idx, _ in line_cmds}, reverse=True)
+                                        deleted_count = 0
+                                        for idx in deletes:
+                                            if 0 <= idx < len(lines):
+                                                del lines[idx]
+                                                deleted_count += 1
+                                        ds_msg = f"{deleted_count} DELETED"
+                                    elif cmd_type == "I":
+                                        inserts = sorted(idx for idx, _ in line_cmds)
+                                        inserted_count = 0
+                                        for idx in inserts:
+                                            insert_at = max(0, min(idx, len(lines)))
+                                            lines.insert(insert_at, "")
+                                            inserted_count += 1
+                                        ds_msg = f"{inserted_count} INSERTED"
+                                    else:  # R
+                                        replicates = sorted({idx for idx, _ in line_cmds}, reverse=True)
+                                        replicated_count = 0
+                                        for idx in replicates:
+                                            if 0 <= idx < len(lines):
+                                                lines.insert(idx + 1, lines[idx])
+                                                replicated_count += 1
+                                        ds_msg = f"{replicated_count} REPLICATED"
+                                    pending_copy_source = None
+
+                            max_start = max(0, len(lines) - records_per_page)
+                            page = min(page, max_start)
+                    else:
+                        for idx, text_value in edited_rows:
                             if idx >= len(lines):
                                 lines.extend([""] * (idx - len(lines) + 1))
-                            lines[idx] = ds_fields.get(addr, "")[: layout.dataset_line_width]
-                    ds_msg = "CHANGES STAGED - PF3 TO SAVE"
+                            lines[idx] = text_value
+                        ds_msg = "CHANGES STAGED - PF3 TO SAVE"
                     ds_cmd = ""
                 elif ds_aid_str == "Enter" and ds_cmd:
                     ds_msg = f"UNKNOWN COMMAND: {ds_cmd}"

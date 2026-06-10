@@ -208,6 +208,12 @@ DATASET_LINES_FIRST_ROW = 3
 DATASET_LINES_MAX_ROWS = 18
 DATASET_LINE_SF_COL = 0
 DATASET_LINE_WIDTH = 78
+DATASET_EDIT_CMD_SF_COL = 0
+DATASET_EDIT_CMD_WIDTH = 6
+DATASET_EDIT_LINE_NO_COL = 0
+DATASET_EDIT_LINE_NO_WIDTH = 6
+DATASET_EDIT_TEXT_SF_COL = 6
+DATASET_EDIT_TEXT_WIDTH = 72
 
 # Catalog — maps mainframe DSN to local file metadata.
 # Dataset bytes are always stored raw; no whole-dataset transcoding is performed.
@@ -306,13 +312,13 @@ def _dataset_cols_ruler(width: int = DATASET_LINE_WIDTH) -> str:
     return "".join(ruler)
 
 
-def _dataset_hex_rows(text: str) -> tuple[str, str]:
-    encoded = text[:DATASET_LINE_WIDTH].ljust(DATASET_LINE_WIDTH).encode(
+def _dataset_hex_rows(text: str, width: int = DATASET_LINE_WIDTH) -> tuple[str, str]:
+    encoded = text[:width].ljust(width).encode(
         STANDARD_TEXT_CCSID, errors="replace"
     )
     high_row = []
     low_row = []
-    for byte in encoded[:DATASET_LINE_WIDTH]:
+    for byte in encoded[:width]:
         hex_byte = f"{byte:02X}"
         high_row.append(hex_byte[0])
         low_row.append(hex_byte[1])
@@ -339,6 +345,7 @@ def send_dataset_panel(
     hex_mode: bool = False,
     lrecl: int = DATASET_LINE_WIDTH,
     short_msg: str = None,
+    line_cmd_overrides: dict = None,
 ):
     """Send a simple ISPF-like dataset Browse/View/Edit panel for sequential datasets."""
     buf = bytearray()
@@ -346,6 +353,7 @@ def send_dataset_panel(
     buf.extend(write_control_character(reset_mdts=True, keyboard_restore=True))
 
     mode = mode.upper()
+    line_cmd_overrides = line_cmd_overrides or {}
     mode_label = {"B": "BROWSE", "V": "VIEW", "E": "EDIT"}.get(mode, mode)
     inner = f" Data Set {mode_label} "
     pad = (79 - len(inner)) // 2
@@ -357,10 +365,14 @@ def send_dataset_panel(
     content_rows = max(1, DATASET_LINES_MAX_ROWS - 2)
     rows_per_record = 4 if hex_mode else 1
     records_per_page = max(1, content_rows // rows_per_record)
-    total_pages = max(1, (len(lines) + records_per_page - 1) // records_per_page)
-    page = max(0, min(page, total_pages - 1))
-    start = page * records_per_page
-    display_lrecl = max(1, min(DATASET_LINE_WIDTH, int(lrecl) if str(lrecl).isdigit() else DATASET_LINE_WIDTH))
+    max_start = max(0, len(lines) - records_per_page)
+    page = max(0, min(page, max_start))
+    start = page
+    edit_text_width = DATASET_EDIT_TEXT_WIDTH if mode == "E" else DATASET_LINE_WIDTH
+    display_lrecl = max(
+        1,
+        min(edit_text_width, int(lrecl) if str(lrecl).isdigit() else edit_text_width),
+    )
 
     _normal(
         buf,
@@ -382,7 +394,15 @@ def send_dataset_panel(
     _text(buf, f"{command[:8]:<8}")
     _sba_sf(buf, DATASET_CMD_ROW, DATASET_CMD_SF_COL + 9, protected=True)
     if show_cols:
-        _normal(buf, DATASET_LINES_FIRST_ROW, DATASET_LINE_SF_COL, _dataset_cols_ruler(DATASET_LINE_WIDTH))
+        if mode == "E":
+            _normal(
+                buf,
+                DATASET_LINES_FIRST_ROW,
+                DATASET_LINE_SF_COL,
+                f"{'':<7}{_dataset_cols_ruler(DATASET_EDIT_TEXT_WIDTH)}",
+            )
+        else:
+            _normal(buf, DATASET_LINES_FIRST_ROW, DATASET_LINE_SF_COL, _dataset_cols_ruler(DATASET_LINE_WIDTH))
 
     _normal(buf, panel_first_row, DATASET_LINE_SF_COL, _dataset_banner("TOP OF DATA"))
     _normal(
@@ -396,31 +416,59 @@ def send_dataset_panel(
         row = content_first_row + (i * rows_per_record)
         text = ""
         if start + i < len(lines):
-            text = lines[start + i][:DATASET_LINE_WIDTH]
+            text = lines[start + i][:edit_text_width]
 
         if hex_mode:
-            _normal(buf, row, DATASET_LINE_SF_COL, f"{'-' * display_lrecl:<{DATASET_LINE_WIDTH}}")
-            hex_high, hex_low = _dataset_hex_rows(text)
-            _normal(buf, row + 1, DATASET_LINE_SF_COL, f"{hex_high:<{DATASET_LINE_WIDTH}}")
-            _normal(buf, row + 2, DATASET_LINE_SF_COL, f"{hex_low:<{DATASET_LINE_WIDTH}}")
+            if mode == "E":
+                _normal(
+                    buf,
+                    row,
+                    DATASET_LINE_SF_COL,
+                    f"{(start + i + 1):06d} {'-' * display_lrecl:<{DATASET_EDIT_TEXT_WIDTH}}",
+                )
+                hex_high, hex_low = _dataset_hex_rows(text, DATASET_EDIT_TEXT_WIDTH)
+                _normal(buf, row + 1, DATASET_LINE_SF_COL, f"{'':<7}{hex_high:<{DATASET_EDIT_TEXT_WIDTH}}")
+                _normal(buf, row + 2, DATASET_LINE_SF_COL, f"{'':<7}{hex_low:<{DATASET_EDIT_TEXT_WIDTH}}")
+            else:
+                _normal(buf, row, DATASET_LINE_SF_COL, f"{'-' * display_lrecl:<{DATASET_LINE_WIDTH}}")
+                hex_high, hex_low = _dataset_hex_rows(text, DATASET_LINE_WIDTH)
+                _normal(buf, row + 1, DATASET_LINE_SF_COL, f"{hex_high:<{DATASET_LINE_WIDTH}}")
+                _normal(buf, row + 2, DATASET_LINE_SF_COL, f"{hex_low:<{DATASET_LINE_WIDTH}}")
             data_row = row + 3
         else:
             data_row = row
 
         if mode == "E":
-            # Anchor SF on the previous row's last column so editable data starts at col 1.
+            line_no = start + i + 1
+            prefix = line_cmd_overrides.get(start + i, f"{line_no:06d}")
+            prefix = str(prefix).upper().ljust(DATASET_EDIT_CMD_WIDTH)[:DATASET_EDIT_CMD_WIDTH]
+
+            # Editable sequence number field that begins in display column 1.
+            # In 3270, SF occupies one cell and data starts at the next column,
+            # so anchor SF at previous row col 79 to make text begin at row col 0.
             _sba(buf, data_row - 1, 79)
             buf.append(SF)
             buf.append(field_attribute(protected=False, mdt=True))
-            _text(buf, f"{text:<{DATASET_LINE_WIDTH}}")
-            _sba_sf(buf, data_row, DATASET_LINE_WIDTH, protected=True)
+            _text(buf, prefix)
+
+            # Editable text field.
+            _sba(buf, data_row, DATASET_EDIT_TEXT_SF_COL)
+            buf.append(SF)
+            buf.append(field_attribute(protected=False, mdt=True))
+            _text(buf, f"{text:<{DATASET_EDIT_TEXT_WIDTH}}")
+            _sba_sf(
+                buf,
+                data_row,
+                DATASET_EDIT_TEXT_SF_COL + DATASET_EDIT_TEXT_WIDTH + 1,
+                protected=True,
+            )
         else:
             _normal(buf, data_row, DATASET_LINE_SF_COL, f"{text:<{DATASET_LINE_WIDTH}}")
 
     if mode == "E":
         buf.append(SBA)
         cursor_row = content_first_row + (3 if hex_mode else 0)
-        buf.extend(encode_pack_addr(cursor_row, DATASET_LINE_SF_COL))
+        buf.extend(encode_pack_addr(cursor_row, DATASET_EDIT_TEXT_SF_COL + 1))
         buf.append(IC)
     else:
         buf.append(SBA)
@@ -428,7 +476,7 @@ def send_dataset_panel(
         buf.append(IC)
 
     footer_text = (
-        "Commands: X=Exit COLS HEX SCROLL PAGE/CSR  PF3=Save  PF7=Up  PF8=Down"
+        "Commands: X=Exit COLS HEX SCROLL PAGE/CSR  Line cmds: I/D/R/C/A/B  PF3=Save PF7/PF8"
         if mode == "E"
         else "Commands: X=Exit COLS HEX SCROLL PAGE/CSR  PF3=End  PF7=Up  PF8=Down"
     )
@@ -943,6 +991,9 @@ UTILITY_LAYOUT = UtilityLayout(
     dataset_lines_max_rows=DATASET_LINES_MAX_ROWS,
     dataset_line_sf_col=DATASET_LINE_SF_COL,
     dataset_line_width=DATASET_LINE_WIDTH,
+    dataset_edit_cmd_sf_col=DATASET_EDIT_CMD_SF_COL,
+    dataset_edit_text_sf_col=DATASET_EDIT_TEXT_SF_COL,
+    dataset_edit_text_width=DATASET_EDIT_TEXT_WIDTH,
 )
 
 

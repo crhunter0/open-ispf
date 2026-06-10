@@ -15,6 +15,9 @@ class UtilityLayout:
     dataset_lines_max_rows: int
     dataset_line_sf_col: int
     dataset_line_width: int
+    dataset_edit_cmd_sf_col: int
+    dataset_edit_text_sf_col: int
+    dataset_edit_text_width: int
 
 
 @dataclass(frozen=True)
