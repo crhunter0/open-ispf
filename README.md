@@ -1,121 +1,148 @@
-# 3270 TN3270 Server
+# Open ISPF TN3270 Server
 
-A Python implementation of a TN3270 server that presents an authentic IBM mainframe experience — complete TSO/E logon panel, RACF authentication, and the ISPF Primary Option Menu — over a standard TCP connection. Connect any real 3270 emulator and it just works.
+A Python TN3270 server that emulates a classic z/OS login and ISPF flow over a normal TCP socket. It now includes a working Utility 3.4 (DSLIST) path with dataset browse/view/edit panels backed by a JSON catalog.
 
-## What you can do
+## Current Features
 
-1. **Connect** any TN3270 emulator (wc3270, x3270, Vista TN3270, etc.) to `localhost:2323`
-2. **Log in** using a RACF userid and password — the server validates credentials and shows proper error messages for bad passwords or missing userids
-3. **Navigate** the ISPF Primary Option Menu — the keyboard is fully live; type an option number and press Enter
+- TN3270 negotiation (BINARY, EOR, TERMINAL-TYPE) for standard 3270 emulators.
+- TSO/E-style logon panel with RACF-style credential validation.
+- ISPF Primary Option Menu and Utility Selection Panel.
+- Utility option 4 (DSLIST) implementation under ISPF option 3.
+- Dataset panels for B (Browse), V (View), and E (Edit) for sequential datasets.
+- CP037/EBCDIC text handling for panel input/output and dataset decoding/encoding.
+- Defensive parsing for malformed Telnet/TN3270 input (covered by robustness test).
 
-### Logon panel
+## What Is Implemented Today
 
-The server presents an authentic z/OS V2R5.0 TSO/E LOGON screen. Fill in your userid and password and press Enter.
+1. Connect with a TN3270 emulator to localhost:2323.
+2. Log in through the TSO/E panel.
+3. Open ISPF Utilities (option 3), then DSLIST (option 4).
+4. Enter a DSN pattern (for example: TESTUSER.*).
+5. Use line commands B, V, or E against listed datasets.
+6. In dataset panels:
+- PF7/PF8 scroll up/down.
+- SCROLL PAGE or SCROLL CSR changes scroll mode.
+- COLS toggles column ruler.
+- HEX toggles hex display rows.
+- X, END, CANCEL, EXIT, or PF3 exits the panel.
+- In Edit mode, PF3 or X path saves changes to disk.
+
+## Screenshots
 
 ![TSO/E Logon Panel](docs/screenshots/logon_panel.png)
+![ISPF Primary Option Menu](docs/screenshots/ispf_menu.png)
 
-**Built-in credentials**
+## Built-in Credentials
 
 | Userid | Password |
 |--------|----------|
-| `IBMUSER` | `SYS1` |
-| `TESTUSER` | `RACF` |
+| GP5CRH | TSYS |
+| TESTUSER | RACF |
 
-The server follows z/OS RACF conventions: userids and passwords are case-insensitive (uppercased before comparison). A wrong password returns `IKJ56425I PASSWORD NOT CORRECT FOR <userid>`. A missing userid returns `IKJ56700I USERID MUST BE SPECIFIED`.
+Credential checks are case-insensitive (values are normalized to uppercase before compare).
 
-### ISPF Primary Option Menu
-
-After a successful login you land on the ISPF Primary Option Menu. The keyboard is unlocked — you can type option numbers and press Enter. Entering `X` or pressing PF3 logs you off and returns to the TSO/E logon panel.
-
-![ISPF Primary Option Menu](docs/screenshots/ispf_menu.png)
-
-The full z/OS ISPF 7.1.0 menu is rendered, including the user ID, system ID (SY1), and current time in the status block. Options 0–13 and X are listed. (Sub-menus are not yet implemented — selecting any option returns you to the main menu with a short message.)
-
-## Quick start
+## Quick Start
 
 ### Prerequisites
 
 - Python 3.8+
-- A TN3270 emulator — [wc3270](https://x3270.miraheze.org/wiki/Wc3270) (Windows) or [x3270](https://x3270.miraheze.org/wiki/X3270) (Linux/macOS) are free and work out of the box
+- A TN3270 emulator (x3270/wc3270 or equivalent)
 
-### Run the server
+### Run
 
 ```sh
 python server.py
 ```
 
-The server listens on port 2323 by default (no root/administrator required, unlike port 23).
+Default listener: 0.0.0.0:2323
 
-### Connect with wc3270 (Windows)
-
-```sh
-wc3270 localhost:2323
-```
-
-### Connect with x3270 (Linux / macOS)
+### Connect
 
 ```sh
 x3270 localhost:2323
 ```
 
-### Connect with any emulator
+or
 
-Point your emulator at `localhost`, port `2323`. The server negotiates TN3270E binary mode, EOR, and terminal-type options automatically and supports IBM-3278 model 2–5 terminals.
-
-## How it works
-
-### TN3270 protocol
-
-TN3270 is Telnet extended with IBM 3270 data-stream framing. The server performs the full Telnet option negotiation (BINARY, EOR, TERMINAL-TYPE) before sending any screen data.
-
-### 3270 data stream
-
-Screens are built with authentic 3270 orders:
-
-| Order | Hex | Purpose |
-|-------|-----|---------|
-| ERASE_WRITE | `0xF5` | Clear screen and write new data |
-| SBA | `0x11` | Set Buffer Address — position the write cursor |
-| SF | `0x1D` | Start Field — define a protected or unprotected input field |
-| IC | `0x13` | Insert Cursor — place the cursor in an input field |
-
-The Write Control Character (WCC) sent after ERASE_WRITE uses `0x43` — the correct x3270/wc3270 bit layout (`WCC_RESET_BIT | WCC_KEYBOARD_RESTORE_BIT | WCC_RESET_MDT_BIT`) — so the keyboard unlocks immediately after every screen update.
-
-### Field parsing
-
-When the user presses Enter or a PF key, the emulator sends an AID byte followed by the cursor address and the contents of all modified fields. The server decodes the 12-bit packed buffer addresses and reads each field's EBCDIC text, then strips whitespace and uppercases credential fields before comparing.
-
-## Project structure
-
-```
-server.py   — the entire TN3270 server (single file)
+```sh
+wc3270 localhost:2323
 ```
 
-Key functions:
+## Configuration
 
-| Function | What it does |
-|----------|-------------|
-| `tn3270_negotiate` | Performs Telnet option handshake |
-| `send_tso_logon` | Builds and sends the TSO/E logon panel |
-| `send_ispf_menu` | Builds and sends the ISPF Primary Option Menu |
-| `read_client_input` | Reads and parses an AID response from the client |
-| `write_control_character` | Encodes a WCC byte with correct x3270 bit positions |
-| `encode_pack_addr` | Converts (row, col) to a 12-bit 3270 buffer address |
-| `handle_client` | Main session loop: logon → ISPF → logoff |
+Global settings are loaded from config.json:
 
-## Extending
+```json
+{
+	"catalog_path": "catalog.json",
+	"text_encoding": "cp037"
+}
+```
 
-To add real sub-menus, replace the `short_msg` response in `handle_client`'s ISPF loop with a call to a new `send_ispf_option_N` function that builds and sends the appropriate screen, then reads the user's response.
+- catalog_path: path to the dataset catalog file.
+- text_encoding: default text CCSID for panel/data text conversions.
 
-To add more users, extend the `_CREDENTIALS` dict at the top of `server.py`.
+If config.json is missing or invalid, safe defaults are used.
+
+## Dataset Catalog
+
+Datasets are defined in catalog.json under datasets. Example entry:
+
+```json
+{
+	"dsn": "TESTUSER.DATA",
+	"path": "data/TESTUSER/DATA.dat",
+	"org": "PS",
+	"recfm": "FB",
+	"lrecl": 80,
+	"content_mode": "text",
+	"text_ccsid": "cp037"
+}
+```
+
+Notes:
+
+- Matching uses DSN wildcards via fnmatch semantics.
+- Entries with org PO/POE are treated as PDS-like and currently return not implemented for member handling.
+- content_mode binary is recognized but browse/save is not implemented yet.
+
+## Project Layout
+
+- server.py: TN3270 protocol handling, panel rendering, session loop.
+- app_config.py: global config loading and path resolution.
+- catalog_store.py: catalog loading/search and dataset file read/write helpers.
+- ispf_utility_handlers.py: utility option dispatch.
+- utilities/base.py: utility action/layout/result dataclasses.
+- utilities/dslist.py: DSLIST and dataset panel interaction workflow.
+- test_robustness.py: malformed input resilience regression test.
+
+## Robustness
+
+The robustness test covers malformed client sequences such as:
+
+- lone IAC byte
+- truncated IAC DO
+- truncated IAC SB
+- bare IAC EOR
+
+Run it with:
+
+```sh
+python test_robustness.py
+```
+
+## Known Limitations
+
+- Most ISPF primary options are placeholders.
+- In Utilities, only option 4 (DSLIST) is implemented.
+- PDS member listing/editing is not implemented yet.
+- Binary dataset viewing/editing is not implemented yet.
+- Current server loop handles one client at a time.
 
 ## References
 
-- [RFC 2355 — TN3270E](https://tools.ietf.org/html/rfc2355)
-- [IBM 3270 Data Stream Programming Reference](https://www.ibm.com/docs/en/zos/2.5.0?topic=reference-3270-data-stream)
-- [x3270 / wc3270 emulator](https://x3270.miraheze.org/wiki/Main_Page)
-- [pmattes/x3270 source (3270ds.h)](https://github.com/pmattes/x3270) — canonical WCC and field-attribute bit definitions
+- RFC 2355 - TN3270E
+- IBM 3270 Data Stream Programming Reference
+- x3270/wc3270 documentation
 
----
-
-For educational and prototyping purposes.
+For educational and prototyping use.

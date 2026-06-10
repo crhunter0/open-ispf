@@ -4,9 +4,11 @@ from utilities.base import UtilityActions, UtilityLayout, UtilityResult
 
 
 def _dataset_display_geometry(layout: UtilityLayout, show_cols: bool, hex_mode: bool) -> tuple[int, int, int]:
-    data_row_start = layout.dataset_lines_first_row + (1 if show_cols else 0)
-    rows_per_record = 2 if hex_mode else 1
-    records_per_page = max(1, layout.dataset_lines_max_rows // rows_per_record)
+    panel_first_row = layout.dataset_lines_first_row + (1 if show_cols else 0)
+    data_row_start = panel_first_row + 1
+    content_rows = max(1, layout.dataset_lines_max_rows - 2)
+    rows_per_record = 4 if hex_mode else 1
+    records_per_page = max(1, content_rows // rows_per_record)
     return data_row_start, rows_per_record, records_per_page
 
 
@@ -100,6 +102,7 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
                     scroll=dslist_scroll,
                     show_cols=dslist_show_cols,
                     hex_mode=dslist_hex_mode,
+                    lrecl=selected.get("lrecl", layout.dataset_line_width),
                     short_msg=ds_msg,
                 )
                 ds_result = actions.read_client_input(client_socket)
@@ -112,12 +115,13 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
                 ds_scroll = ds_fields.get(layout.dataset_scroll_addr, "").strip().upper()
 
                 if ds_scroll in {"PAGE", "CSR"}:
-                    dslist_scroll = ds_scroll
+                    if ds_scroll != dslist_scroll:
+                        dslist_scroll = ds_scroll
+                elif ds_scroll and not ds_cmd:
+                    ds_cmd = ds_scroll
+
+                if ds_scroll in {"PAGE", "CSR"} and not ds_cmd:
                     ds_msg = None
-                    ds_cmd = ""
-                    continue
-                if ds_scroll:
-                    ds_msg = f"INVALID SCROLL VALUE: {ds_scroll}"
                     ds_cmd = ""
                     continue
 
@@ -135,7 +139,7 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
                         ds_msg = f"UNKNOWN COMMAND: {ds_cmd}"
                         ds_cmd = ""
                         continue
-                    ds_msg = None
+                    ds_msg = f"COLS {'ON' if dslist_show_cols else 'OFF'}"
                     ds_cmd = ""
                     continue
 
@@ -150,7 +154,7 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
                         ds_msg = f"UNKNOWN COMMAND: {ds_cmd}"
                         ds_cmd = ""
                         continue
-                    ds_msg = None
+                    ds_msg = f"HEX {'ON' if dslist_hex_mode else 'OFF'}"
                     ds_cmd = ""
                     continue
 
@@ -261,7 +265,10 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
                     )
                     start_idx = page * records_per_page
                     for i in range(records_per_page):
-                        addr = (data_row_start + (i * rows_per_record)) * 80 + (layout.dataset_line_sf_col + 1)
+                        row = data_row_start + (i * rows_per_record)
+                        if dslist_hex_mode:
+                            row += 3
+                        addr = row * 80 + layout.dataset_line_sf_col
                         if addr in ds_fields:
                             idx = start_idx + i
                             if idx >= len(lines):
