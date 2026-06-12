@@ -393,6 +393,7 @@ def send_dataset_panel(
     buf.append(field_attribute(protected=False, mdt=True))
     _text(buf, f"{command[:8]:<8}")
     _sba_sf(buf, DATASET_CMD_ROW, DATASET_CMD_SF_COL + 9, protected=True)
+
     if show_cols:
         if mode == "E":
             _normal(
@@ -468,7 +469,9 @@ def send_dataset_panel(
     if mode == "E":
         buf.append(SBA)
         cursor_row = content_first_row + (3 if hex_mode else 0)
-        buf.extend(encode_pack_addr(cursor_row, DATASET_EDIT_TEXT_SF_COL + 1))
+        # Start cursor in the 6-char prefix command area (col 1) so line
+        # commands are entered reliably without extra cursor movement.
+        buf.extend(encode_pack_addr(cursor_row, DATASET_EDIT_LINE_NO_COL))
         buf.append(IC)
     else:
         buf.append(SBA)
@@ -476,7 +479,7 @@ def send_dataset_panel(
         buf.append(IC)
 
     footer_text = (
-        "Commands: X=Exit COLS HEX SCROLL PAGE/CSR  Line cmds: I/D/R/C/A/B  PF3=Save PF7/PF8"
+        "Commands: X=Exit COLS HEX SCROLL PAGE/CSR  Line cmds: I/D/DD/R/RR/C/CC/A/B PF3=Save PF7/PF8"
         if mode == "E"
         else "Commands: X=Exit COLS HEX SCROLL PAGE/CSR  PF3=End  PF7=Up  PF8=Down"
     )
@@ -871,7 +874,10 @@ def read_client_input(client_socket):
             while i < len(buffer) and buffer[i] not in (SBA_ORD, SF_ORD):
                 field_bytes.append(buffer[i])
                 i += 1
-            field_text = field_bytes.decode(STANDARD_TEXT_CCSID).strip()
+            # Preserve leading spaces so partial-field updates keep their
+            # original in-field column offsets. This is required for reliable
+            # line-command parsing in editable prefixes.
+            field_text = field_bytes.decode(STANDARD_TEXT_CCSID).rstrip()
             if field_text:
                 results[addr] = field_text
         else:

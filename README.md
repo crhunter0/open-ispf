@@ -24,6 +24,13 @@ A Python TN3270 server that emulates a classic z/OS login and ISPF flow over a n
 - SCROLL PAGE or SCROLL CSR changes scroll mode.
 - COLS toggles column ruler.
 - HEX toggles hex display rows.
+- Edit line command I inserts a blank line at the selected row.
+- Edit line command D deletes the selected row.
+- Edit block command DD marks a delete block (two DD markers) and deletes the range.
+- Edit line command R replicates the selected row below itself.
+- Edit line command C marks a source row and A/B applies copy After/Before a target row.
+- Edit block command CC marks a block source (two CC markers) and A/B copies block After/Before target.
+- Edit block command RR marks a block (two RR markers) and replicates it below the block.
 - X, END, CANCEL, EXIT, or PF3 exits the panel.
 - In Edit mode, PF3 or X path saves changes to disk.
 
