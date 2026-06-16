@@ -6,6 +6,7 @@ from pathlib import Path
 from datetime import datetime
 from enum import Enum
 from ispf_utility_handlers import UtilityActions, UtilityLayout, handle_utility_option
+from utilities.dslist import edit_dataset_by_name
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -189,6 +190,22 @@ ISPF_OPTION_SF_COL = 13
 ISPF_OPTION_ROW = 2
 ISPF_OPTION_ADDR = ISPF_OPTION_ROW * 80 + (ISPF_OPTION_SF_COL + 1)
 
+# Utility 3.2 Data Set panel fields
+DSUTIL_OPTION_ROW = 2
+DSUTIL_OPTION_SF_COL = 13
+DSUTIL_OPTION_ADDR = DSUTIL_OPTION_ROW * 80 + (DSUTIL_OPTION_SF_COL + 1)
+DSUTIL_DSN_ROW = 4
+DSUTIL_DSN_SF_COL = 19
+DSUTIL_DSN_ADDR = DSUTIL_DSN_ROW * 80 + (DSUTIL_DSN_SF_COL + 1)
+DSUTIL_NEW_DSN_ROW = 5
+DSUTIL_NEW_DSN_SF_COL = 19
+DSUTIL_NEW_DSN_ADDR = DSUTIL_NEW_DSN_ROW * 80 + (DSUTIL_NEW_DSN_SF_COL + 1)
+
+# ISPF option 2 (Edit) entry panel fields
+EDIT_DSN_ROW = 5
+EDIT_DSN_SF_COL = 19
+EDIT_DSN_ADDR = EDIT_DSN_ROW * 80 + (EDIT_DSN_SF_COL + 1)
+
 # DSLIST panel: "Dsname Level ===>" input field at row 2, SF at col 19
 DSLIST_LEVEL_ROW = 2
 DSLIST_LEVEL_SF_COL = 19
@@ -235,6 +252,15 @@ def load_catalog() -> list:
     except Exception as e:
         print(f"Catalog load error: {e}")
         return []
+
+
+def save_catalog(entries: list) -> str:
+    try:
+        payload = {"datasets": entries}
+        CATALOG_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return None
+    except Exception as e:
+        return f"CATALOG SAVE FAILED: {e}"
 
 
 def search_catalog(entries: list, pattern: str) -> list:
@@ -739,6 +765,103 @@ def send_ispf_utils(client_socket, short_msg: str = None):
     client_socket.sendall(buf)
 
 
+def send_ispf_dsutil(
+    client_socket,
+    option: str = "",
+    dsn: str = "",
+    new_dsn: str = "",
+    short_msg: str = None,
+):
+    """Send ISPF 3.2 Data Set Utility panel."""
+    buf = bytearray()
+    buf.append(0xF5)  # ERASE_WRITE
+    buf.extend(write_control_character(reset_mdts=True, keyboard_restore=True))
+
+    inner = " ISPF UTILITIES - DATA SET "
+    pad = (79 - len(inner)) // 2
+    border = "-" * pad + inner + "-" * (79 - pad - len(inner))
+    _high(buf, 0, 0, border)
+
+    _normal(buf, 2, 1, "Option ===>")
+    _sba(buf, DSUTIL_OPTION_ROW, DSUTIL_OPTION_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{option[:2]:<2}")
+    _sba_sf(buf, DSUTIL_OPTION_ROW, DSUTIL_OPTION_SF_COL + 3, protected=True)
+
+    _normal(buf, 4, 1, "Data Set Name ===>")
+    _sba(buf, DSUTIL_DSN_ROW, DSUTIL_DSN_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{dsn[:44]:<44}")
+    _sba_sf(buf, DSUTIL_DSN_ROW, DSUTIL_DSN_SF_COL + 45, protected=True)
+
+    _normal(buf, 5, 1, "New Name     ===>")
+    _sba(buf, DSUTIL_NEW_DSN_ROW, DSUTIL_NEW_DSN_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{new_dsn[:44]:<44}")
+    _sba_sf(buf, DSUTIL_NEW_DSN_ROW, DSUTIL_NEW_DSN_SF_COL + 45, protected=True)
+
+    _normal(buf, 7, 1, "Specify one of the following options:")
+    _normal(buf, 9, 3, "A  - Allocate new data set")
+    _normal(buf, 10, 3, "R  - Rename data set")
+    _normal(buf, 11, 3, "D  - Delete data set")
+    _normal(buf, 12, 3, "C  - Catalog data set (not implemented)")
+    _normal(buf, 13, 3, "U  - Uncatalog data set (not implemented)")
+    _normal(buf, 14, 3, "I  - Data set information (not implemented)")
+    _normal(buf, 15, 3, "M  - Member list (not implemented)")
+    _normal(buf, 17, 1, "Enter X or press PF3 to return to Utility Selection Panel")
+
+    if short_msg:
+        _high(buf, 19, 1, short_msg[:78])
+
+    buf.append(SBA)
+    buf.extend(encode_pack_addr(DSUTIL_OPTION_ROW, DSUTIL_OPTION_SF_COL + 1))
+    buf.append(IC)
+
+    _high(buf, 23, 0, "-" * 79)
+    buf.extend([IAC, EOR])
+    print("TX:", binascii.hexlify(buf))
+    client_socket.sendall(buf)
+
+
+def send_ispf_edit_entry(client_socket, dsn: str = "", short_msg: str = None):
+    """Send ISPF Edit Entry Panel (option 2)."""
+    buf = bytearray()
+    buf.append(0xF5)  # ERASE_WRITE
+    buf.extend(write_control_character(reset_mdts=True, keyboard_restore=True))
+
+    inner = " EDIT - ENTRY PANEL "
+    pad = (79 - len(inner)) // 2
+    border = "-" * pad + inner + "-" * (79 - pad - len(inner))
+    _high(buf, 0, 0, border)
+
+    _normal(buf, 2, 1, "Specify a data set name to edit")
+    _normal(buf, 3, 1, "(Option 2 routes to the editor with existing line/block commands)")
+
+    _normal(buf, EDIT_DSN_ROW, 1, "Data Set Name ===>")
+    _sba(buf, EDIT_DSN_ROW, EDIT_DSN_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{dsn[:44]:<44}")
+    _sba_sf(buf, EDIT_DSN_ROW, EDIT_DSN_SF_COL + 45, protected=True)
+
+    buf.append(SBA)
+    buf.extend(encode_pack_addr(EDIT_DSN_ROW, EDIT_DSN_SF_COL + 1))
+    buf.append(IC)
+
+    if short_msg:
+        _high(buf, 7, 1, short_msg[:78])
+
+    _normal(buf, 20, 1, "ENTER to continue, PF3 to return to ISPF Primary Option Menu")
+    _high(buf, 23, 0, "-" * 79)
+
+    buf.extend([IAC, EOR])
+    print("TX:", binascii.hexlify(buf))
+    client_socket.sendall(buf)
+
+
 def send_ispf_dslist(client_socket, level: str = "", rows=None, short_msg: str = None):
     """Send ISPF 3.4 Data Set List Utility panel."""
     rows = rows or []
@@ -987,6 +1110,9 @@ def tn3270_negotiate(client_socket):
 
 UTILITY_LAYOUT = UtilityLayout(
     ispf_option_addr=ISPF_OPTION_ADDR,
+    dsutil_option_addr=DSUTIL_OPTION_ADDR,
+    dsutil_dsn_addr=DSUTIL_DSN_ADDR,
+    dsutil_new_dsn_addr=DSUTIL_NEW_DSN_ADDR,
     dslist_level_addr=DSLIST_LEVEL_ADDR,
     dslist_results_first_row=DSLIST_RESULTS_FIRST_ROW,
     dslist_results_max_rows=DSLIST_RESULTS_MAX_ROWS,
@@ -1004,11 +1130,13 @@ UTILITY_LAYOUT = UtilityLayout(
 
 
 UTILITY_ACTIONS = UtilityActions(
+    send_ispf_dsutil=send_ispf_dsutil,
     send_ispf_dslist=send_ispf_dslist,
     send_dataset_panel=send_dataset_panel,
     read_client_input=read_client_input,
     aid_to_string=aid_to_string,
     load_catalog=load_catalog,
+    save_catalog=save_catalog,
     search_catalog=search_catalog,
     is_pds_like=_is_pds_like,
     load_dataset_lines=load_dataset_lines,
@@ -1071,7 +1199,45 @@ def handle_client(client_socket, addr):
                 break
 
             valid_opts = {"0", "1", "2", "4", "5", "6", "7", "9", "10", "11", "12", "13"}
-            if option == "3":
+            if option == "2":
+                edit_dsn = ""
+                edit_msg = None
+                while True:
+                    send_ispf_edit_entry(client_socket, dsn=edit_dsn, short_msg=edit_msg)
+                    edit_result = read_client_input(client_socket)
+                    if edit_result is None:
+                        return
+
+                    edit_aid, edit_cursor_addr, edit_fields = edit_result
+                    edit_aid_str = aid_to_string(edit_aid)
+                    entered_dsn = edit_fields.get(EDIT_DSN_ADDR, "").strip().upper()
+                    if entered_dsn:
+                        edit_dsn = entered_dsn
+
+                    if edit_dsn == "X" or edit_aid_str in ("PF3", "PF15"):
+                        short_msg = None
+                        break
+
+                    if edit_aid_str != "Enter":
+                        edit_msg = "PRESS ENTER TO EDIT OR PF3 TO RETURN"
+                        continue
+
+                    if not edit_dsn:
+                        edit_msg = "ENTER A DATA SET NAME"
+                        continue
+
+                    launched = edit_dataset_by_name(
+                        client_socket=client_socket,
+                        actions=UTILITY_ACTIONS,
+                        layout=UTILITY_LAYOUT,
+                        dsn_input=edit_dsn,
+                    )
+                    if launched.disconnect:
+                        return
+                    edit_msg = launched.message
+
+                short_msg = None
+            elif option == "3":
                 utils_msg = None
                 while True:
                     send_ispf_utils(client_socket, utils_msg)

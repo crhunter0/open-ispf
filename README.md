@@ -16,10 +16,11 @@ A Python TN3270 server that emulates a classic z/OS login and ISPF flow over a n
 
 1. Connect with a TN3270 emulator to localhost:2323.
 2. Log in through the TSO/E panel.
-3. Open ISPF Utilities (option 3), then DSLIST (option 4).
-4. Enter a DSN pattern (for example: TESTUSER.*).
-5. Use line commands B, V, or E against listed datasets.
-6. In dataset panels:
+3. Use main ISPF option 2 (Edit) to enter the DSLIST-backed edit workflow directly.
+4. Or open ISPF Utilities (option 3), then DSLIST (option 4).
+5. Enter a DSN pattern (for example: TESTUSER.*).
+6. Use line commands B, V, or E against listed datasets.
+7. In dataset panels:
 - PF7/PF8 scroll up/down.
 - SCROLL PAGE or SCROLL CSR changes scroll mode.
 - COLS toggles column ruler.

@@ -1,9 +1,10 @@
 from typing import Dict
 
-from utilities import UtilityActions, UtilityHandler, UtilityLayout, UtilityResult, handle_dslist
+from utilities import UtilityActions, UtilityHandler, UtilityLayout, UtilityResult, handle_dslist, handle_dsutil
 
 
 UTILITY_HANDLERS: Dict[str, UtilityHandler] = {
+    "2": handle_dsutil,
     "4": handle_dslist,
 }
 
