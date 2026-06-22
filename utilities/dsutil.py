@@ -1,16 +1,19 @@
+import shutil
 from pathlib import Path
 
 from app_config import BASE_DIR, TEXT_ENCODING
 from utilities.base import UtilityActions, UtilityLayout, UtilityResult
 
 
-def _default_dataset_relpath(dsn: str) -> str:
+def _default_dataset_relpath(dsn: str, dsorg: str = "PS") -> str:
     parts = [p for p in dsn.split(".") if p]
     if not parts:
-        return "data/UNKNOWN/DATA.dat"
+        return "data/UNKNOWN/DATA" if dsorg == "PO" else "data/UNKNOWN/DATA.dat"
 
     hlq = parts[0]
     rest = parts[1:] or ["DATA"]
+    if dsorg == "PO":
+        return f"data/{hlq}/{'_'.join(rest)}"
     filename = "_".join(rest) + ".dat"
     return f"data/{hlq}/{filename}"
 
@@ -26,6 +29,7 @@ def handle_dsutil(client_socket, actions: UtilityActions, layout: UtilityLayout)
     option = ""
     dsn = ""
     new_dsn = ""
+    dsorg = "PS"
     msg = None
 
     while True:
@@ -34,6 +38,7 @@ def handle_dsutil(client_socket, actions: UtilityActions, layout: UtilityLayout)
             option=option,
             dsn=dsn,
             new_dsn=new_dsn,
+            dsorg=dsorg,
             short_msg=msg,
         )
 
@@ -47,6 +52,7 @@ def handle_dsutil(client_socket, actions: UtilityActions, layout: UtilityLayout)
         entered_opt = fields.get(layout.dsutil_option_addr, "").rstrip().upper()
         entered_dsn = fields.get(layout.dsutil_dsn_addr, "").strip().upper()
         entered_new_dsn = fields.get(layout.dsutil_new_dsn_addr, "").strip().upper()
+        entered_type = fields.get(layout.dsutil_type_addr, "").strip().upper()
 
         if entered_opt:
             option = entered_opt[:1]
@@ -54,6 +60,8 @@ def handle_dsutil(client_socket, actions: UtilityActions, layout: UtilityLayout)
             dsn = entered_dsn
         if entered_new_dsn:
             new_dsn = entered_new_dsn
+        if entered_type:
+            dsorg = entered_type[:2]
 
         if option == "X" or aid_str in ("PF3", "PF15"):
             return UtilityResult(message=None)
@@ -85,17 +93,30 @@ def handle_dsutil(client_socket, actions: UtilityActions, layout: UtilityLayout)
                 msg = f"DATA SET ALREADY EXISTS: {norm_dsn}"
                 continue
 
-            rel_path = _default_dataset_relpath(norm_dsn)
+            if dsorg not in {"PS", "PO"}:
+                msg = "INVALID DATA SET TYPE (USE PS OR PO)"
+                continue
+
+            rel_path = _default_dataset_relpath(norm_dsn, dsorg)
             abs_path = BASE_DIR / rel_path
             abs_path.parent.mkdir(parents=True, exist_ok=True)
-            if not abs_path.exists():
-                abs_path.write_bytes("".encode(TEXT_ENCODING))
+            try:
+                if dsorg == "PO":
+                    abs_path.mkdir(parents=True, exist_ok=False)
+                elif not abs_path.exists():
+                    abs_path.write_bytes("".encode(TEXT_ENCODING))
+            except FileExistsError:
+                msg = f"TARGET PATH ALREADY EXISTS: {rel_path}"
+                continue
+            except Exception as e:
+                msg = f"ALLOCATE FAILED: {e}"
+                continue
 
             catalog.append(
                 {
                     "dsn": norm_dsn,
                     "path": rel_path,
-                    "org": "PS",
+                    "org": dsorg,
                     "recfm": "FB",
                     "lrecl": 80,
                     "content_mode": "text",
@@ -115,9 +136,11 @@ def handle_dsutil(client_socket, actions: UtilityActions, layout: UtilityLayout)
                 continue
 
             try:
-                file_path = BASE_DIR / str(entry.get("path", "")).strip()
-                if file_path.exists() and file_path.is_file():
-                    file_path.unlink()
+                entry_path = BASE_DIR / str(entry.get("path", "")).strip()
+                if entry_path.exists() and entry_path.is_dir():
+                    shutil.rmtree(entry_path)
+                elif entry_path.exists() and entry_path.is_file():
+                    entry_path.unlink()
             except Exception as e:
                 msg = f"DELETE FAILED: {e}"
                 continue
@@ -145,11 +168,12 @@ def handle_dsutil(client_socket, actions: UtilityActions, layout: UtilityLayout)
             continue
 
         old_path = BASE_DIR / str(entry.get("path", "")).strip()
-        new_rel = _default_dataset_relpath(norm_new)
+        entry_org = str(entry.get("org", "PS")).strip().upper() or "PS"
+        new_rel = _default_dataset_relpath(norm_new, entry_org)
         new_path = BASE_DIR / new_rel
 
         try:
-            if old_path.exists() and old_path.is_file():
+            if old_path.exists():
                 new_path.parent.mkdir(parents=True, exist_ok=True)
                 old_path.rename(new_path)
                 entry["path"] = new_rel

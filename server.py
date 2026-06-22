@@ -200,6 +200,9 @@ DSUTIL_DSN_ADDR = DSUTIL_DSN_ROW * 80 + (DSUTIL_DSN_SF_COL + 1)
 DSUTIL_NEW_DSN_ROW = 5
 DSUTIL_NEW_DSN_SF_COL = 19
 DSUTIL_NEW_DSN_ADDR = DSUTIL_NEW_DSN_ROW * 80 + (DSUTIL_NEW_DSN_SF_COL + 1)
+DSUTIL_TYPE_ROW = 6
+DSUTIL_TYPE_SF_COL = 19
+DSUTIL_TYPE_ADDR = DSUTIL_TYPE_ROW * 80 + (DSUTIL_TYPE_SF_COL + 1)
 
 # ISPF option 2 (Edit) entry panel fields
 EDIT_DSN_ROW = 5
@@ -770,6 +773,7 @@ def send_ispf_dsutil(
     option: str = "",
     dsn: str = "",
     new_dsn: str = "",
+    dsorg: str = "PS",
     short_msg: str = None,
 ):
     """Send ISPF 3.2 Data Set Utility panel."""
@@ -803,8 +807,15 @@ def send_ispf_dsutil(
     _text(buf, f"{new_dsn[:44]:<44}")
     _sba_sf(buf, DSUTIL_NEW_DSN_ROW, DSUTIL_NEW_DSN_SF_COL + 45, protected=True)
 
+    _normal(buf, 6, 1, "Data Set Type ===>")
+    _sba(buf, DSUTIL_TYPE_ROW, DSUTIL_TYPE_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{dsorg[:2].upper():<2}")
+    _sba_sf(buf, DSUTIL_TYPE_ROW, DSUTIL_TYPE_SF_COL + 3, protected=True)
+
     _normal(buf, 7, 1, "Specify one of the following options:")
-    _normal(buf, 9, 3, "A  - Allocate new data set")
+    _normal(buf, 9, 3, "A  - Allocate new data set (PS or PO)")
     _normal(buf, 10, 3, "R  - Rename data set")
     _normal(buf, 11, 3, "D  - Delete data set")
     _normal(buf, 12, 3, "C  - Catalog data set (not implemented)")
@@ -862,7 +873,13 @@ def send_ispf_edit_entry(client_socket, dsn: str = "", short_msg: str = None):
     client_socket.sendall(buf)
 
 
-def send_ispf_dslist(client_socket, level: str = "", rows=None, short_msg: str = None):
+def send_ispf_dslist(
+    client_socket,
+    level: str = "",
+    rows=None,
+    short_msg: str = None,
+    footer_hint: str = None,
+):
     """Send ISPF 3.4 Data Set List Utility panel."""
     rows = rows or []
     buf = bytearray()
@@ -914,7 +931,8 @@ def send_ispf_dslist(client_socket, level: str = "", rows=None, short_msg: str =
         _normal(buf, row, 4, f"  {dsn:<35}  {org:<3}  {recfm:<5} {lrecl:>5}  {mode:<6}")
 
     # Row 22: usage hint; Row 23: bottom border
-    _normal(buf, 22, 1, "Enter DSN pattern, or line cmd B/V/E. X or PF3 to return.")
+    hint = footer_hint or "Enter DSN pattern, or line cmd B/V/E. X or PF3 to return."
+    _normal(buf, 22, 1, hint[:78])
     _high(buf, 23, 0, "-" * 79)
 
     buf.extend([IAC, EOR])
@@ -1113,6 +1131,7 @@ UTILITY_LAYOUT = UtilityLayout(
     dsutil_option_addr=DSUTIL_OPTION_ADDR,
     dsutil_dsn_addr=DSUTIL_DSN_ADDR,
     dsutil_new_dsn_addr=DSUTIL_NEW_DSN_ADDR,
+    dsutil_type_addr=DSUTIL_TYPE_ADDR,
     dslist_level_addr=DSLIST_LEVEL_ADDR,
     dslist_results_first_row=DSLIST_RESULTS_FIRST_ROW,
     dslist_results_max_rows=DSLIST_RESULTS_MAX_ROWS,

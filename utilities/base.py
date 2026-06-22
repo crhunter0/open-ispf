@@ -8,6 +8,7 @@ class UtilityLayout:
     dsutil_option_addr: int
     dsutil_dsn_addr: int
     dsutil_new_dsn_addr: int
+    dsutil_type_addr: int
     dslist_level_addr: int
     dslist_results_first_row: int
     dslist_results_max_rows: int
