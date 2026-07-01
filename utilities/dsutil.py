@@ -25,6 +25,14 @@ def _find_entry(catalog: list, norm_dsn: str, normalize_dsn) -> tuple[int, dict]
     return -1, None
 
 
+def _extract_jump_option(*values: str) -> str:
+    for value in values:
+        text = str(value or "").strip().upper()
+        if text.startswith("=") and len(text) > 1:
+            return text[1:]
+    return ""
+
+
 def handle_dsutil(client_socket, actions: UtilityActions, layout: UtilityLayout) -> UtilityResult:
     option = ""
     dsn = ""
@@ -54,6 +62,10 @@ def handle_dsutil(client_socket, actions: UtilityActions, layout: UtilityLayout)
         entered_new_dsn = fields.get(layout.dsutil_new_dsn_addr, "").strip().upper()
         entered_type = fields.get(layout.dsutil_type_addr, "").strip().upper()
 
+        jump_option = _extract_jump_option(entered_opt, entered_dsn, entered_new_dsn, entered_type)
+        if jump_option:
+            return UtilityResult(message=None, jump_option=jump_option)
+
         if entered_opt:
             option = entered_opt[:1]
         if entered_dsn:
@@ -66,9 +78,10 @@ def handle_dsutil(client_socket, actions: UtilityActions, layout: UtilityLayout)
         if option == "X" or aid_str in ("PF3", "PF15"):
             return UtilityResult(message=None)
 
-        if aid_str != "Enter":
-            msg = "PRESS ENTER TO PROCESS OPTION OR PF3 TO RETURN"
-            continue
+        # 3270 emulator/key mapping differences can send non-Enter AIDs for
+        # what is effectively a submit action on this panel. For robustness,
+        # treat any non-exit key as submit.
+        aid_str = "Enter"
 
         if not option:
             msg = "ENTER A DATA SET UTILITY OPTION"

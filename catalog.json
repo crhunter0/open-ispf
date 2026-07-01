@@ -89,6 +89,42 @@
       "lrecl": 80,
       "content_mode": "text",
       "text_ccsid": "cp037"
+    },
+    {
+      "dsn": "GP5CRH.DATA.COPY",
+      "path": "data/GP5CRH/DATA_COPY.dat",
+      "org": "PS",
+      "recfm": "FB",
+      "lrecl": 80,
+      "content_mode": "text",
+      "text_ccsid": "cp037"
+    },
+    {
+      "dsn": "GP5CRH.JCLLIB",
+      "path": "data/GP5CRH/JCLLIB",
+      "org": "PO",
+      "recfm": "FB",
+      "lrecl": 80,
+      "content_mode": "text",
+      "text_ccsid": "cp037"
+    },
+    {
+      "dsn": "GP5CRH.TEST.NEW.FLAT",
+      "path": "data/GP5CRH/TEST_NEW_FLAT.dat",
+      "org": "PS",
+      "recfm": "FB",
+      "lrecl": 80,
+      "content_mode": "text",
+      "text_ccsid": "cp037"
+    },
+    {
+      "dsn": "GP5CRH.TEST.NEW.PDS",
+      "path": "data/GP5CRH/TEST_NEW_PDS",
+      "org": "PO",
+      "recfm": "FB",
+      "lrecl": 80,
+      "content_mode": "text",
+      "text_ccsid": "cp037"
     }
   ]
 }

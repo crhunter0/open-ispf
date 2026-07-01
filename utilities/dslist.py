@@ -141,6 +141,13 @@ def _next_auto_member_name(pds_path: Path) -> str:
     return "NEW9999"
 
 
+def _extract_jump_option(value: str) -> str:
+    text = str(value or "").strip().upper()
+    if text.startswith("=") and len(text) > 1:
+        return text[1:]
+    return ""
+
+
 def _run_pds_member_list_session(
     client_socket,
     actions: UtilityActions,
@@ -175,8 +182,17 @@ def _run_pds_member_list_session(
         member_aid_str = actions.aid_to_string(member_aid)
         entered_level = member_fields.get(layout.dslist_level_addr, "").strip().upper()
 
+        jump_option = _extract_jump_option(entered_level)
+        if jump_option:
+            return UtilityResult(message=None, jump_option=jump_option)
+
         if entered_level == "X" or member_aid_str in ("PF3", "PF15"):
             return UtilityResult(message=None)
+
+        # 3270 emulator/key mapping differences can send non-Enter AIDs for
+        # what is effectively a submit action on this panel. For robustness,
+        # treat any non-exit key as submit.
+        member_aid_str = "Enter"
 
         selected = None
         selected_cmd = None
@@ -265,6 +281,8 @@ def _run_pds_member_list_session(
                 selected_cmd=selected_cmd,
             )
             if launched.disconnect:
+                return launched
+            if launched.jump_option:
                 return launched
             member_msg = launched.message
             continue
@@ -366,6 +384,10 @@ def _run_dataset_editor_session(
         ds_aid_str = actions.aid_to_string(ds_aid)
         ds_cmd = ds_fields.get(layout.dataset_cmd_addr, "").strip().upper()
         ds_scroll = ds_fields.get(layout.dataset_scroll_addr, "").strip().upper()
+
+        jump_option = _extract_jump_option(ds_cmd)
+        if jump_option:
+            return UtilityResult(message=None, jump_option=jump_option)
 
         if selected_cmd == "E" and ds_aid_str != "Enter":
             data_row_start, rows_per_record, records_per_page = _dataset_display_geometry(
@@ -887,6 +909,10 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
         dl_aid_str = actions.aid_to_string(dl_aid)
         dl_entered = dl_fields.get(layout.dslist_level_addr, "").strip().upper()
 
+        jump_option = _extract_jump_option(dl_entered)
+        if jump_option:
+            return UtilityResult(message=None, jump_option=jump_option)
+
         if dl_entered == "X" or dl_aid_str in ("PF3", "PF15"):
             return UtilityResult(message=None)
 
@@ -921,6 +947,8 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
                     default_cmd=selected_cmd,
                 )
                 if launched.disconnect:
+                    return launched
+                if launched.jump_option:
                     return launched
                 dslist_msg = launched.message
                 continue
@@ -976,6 +1004,10 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
                 ds_aid_str = actions.aid_to_string(ds_aid)
                 ds_cmd = ds_fields.get(layout.dataset_cmd_addr, "").strip().upper()
                 ds_scroll = ds_fields.get(layout.dataset_scroll_addr, "").strip().upper()
+
+                jump_option = _extract_jump_option(ds_cmd)
+                if jump_option:
+                    return UtilityResult(message=None, jump_option=jump_option)
 
                 # Some emulators can report a non-Enter AID even when editable
                 # data/line-command fields changed. If we detect edit-row

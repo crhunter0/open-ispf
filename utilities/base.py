@@ -9,6 +9,11 @@ class UtilityLayout:
     dsutil_dsn_addr: int
     dsutil_new_dsn_addr: int
     dsutil_type_addr: int
+    movecopy_option_addr: int
+    movecopy_from_dsn_addr: int
+    movecopy_from_member_addr: int
+    movecopy_to_dsn_addr: int
+    movecopy_to_member_addr: int
     dslist_level_addr: int
     dslist_results_first_row: int
     dslist_results_max_rows: int
@@ -27,6 +32,7 @@ class UtilityLayout:
 @dataclass(frozen=True)
 class UtilityActions:
     send_ispf_dsutil: Callable[..., None]
+    send_ispf_movecopy: Callable[..., None]
     send_ispf_dslist: Callable[..., None]
     send_dataset_panel: Callable[..., None]
     read_client_input: Callable[[Any], Any]
@@ -45,6 +51,7 @@ class UtilityResult:
     message: Optional[str]
     exit_menu: bool = False
     disconnect: bool = False
+    jump_option: Optional[str] = None
 
 
 UtilityHandler = Callable[[Any, UtilityActions, UtilityLayout], UtilityResult]

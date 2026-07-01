@@ -193,6 +193,7 @@ ISPF_OPTION_ADDR = ISPF_OPTION_ROW * 80 + (ISPF_OPTION_SF_COL + 1)
 # Utility 3.2 Data Set panel fields
 DSUTIL_OPTION_ROW = 2
 DSUTIL_OPTION_SF_COL = 13
+DSUTIL_OPTION_WIDTH = 64
 DSUTIL_OPTION_ADDR = DSUTIL_OPTION_ROW * 80 + (DSUTIL_OPTION_SF_COL + 1)
 DSUTIL_DSN_ROW = 4
 DSUTIL_DSN_SF_COL = 19
@@ -203,6 +204,23 @@ DSUTIL_NEW_DSN_ADDR = DSUTIL_NEW_DSN_ROW * 80 + (DSUTIL_NEW_DSN_SF_COL + 1)
 DSUTIL_TYPE_ROW = 6
 DSUTIL_TYPE_SF_COL = 19
 DSUTIL_TYPE_ADDR = DSUTIL_TYPE_ROW * 80 + (DSUTIL_TYPE_SF_COL + 1)
+
+# Utility 3.3 Move/Copy panel fields
+MOVECOPY_OPTION_ROW = 2
+MOVECOPY_OPTION_SF_COL = 13
+MOVECOPY_OPTION_ADDR = MOVECOPY_OPTION_ROW * 80 + (MOVECOPY_OPTION_SF_COL + 1)
+MOVECOPY_FROM_DSN_ROW = 9
+MOVECOPY_FROM_DSN_SF_COL = 19
+MOVECOPY_FROM_DSN_ADDR = MOVECOPY_FROM_DSN_ROW * 80 + (MOVECOPY_FROM_DSN_SF_COL + 1)
+MOVECOPY_FROM_MEMBER_ROW = 10
+MOVECOPY_FROM_MEMBER_SF_COL = 19
+MOVECOPY_FROM_MEMBER_ADDR = MOVECOPY_FROM_MEMBER_ROW * 80 + (MOVECOPY_FROM_MEMBER_SF_COL + 1)
+MOVECOPY_TO_DSN_ROW = 12
+MOVECOPY_TO_DSN_SF_COL = 19
+MOVECOPY_TO_DSN_ADDR = MOVECOPY_TO_DSN_ROW * 80 + (MOVECOPY_TO_DSN_SF_COL + 1)
+MOVECOPY_TO_MEMBER_ROW = 13
+MOVECOPY_TO_MEMBER_SF_COL = 19
+MOVECOPY_TO_MEMBER_ADDR = MOVECOPY_TO_MEMBER_ROW * 80 + (MOVECOPY_TO_MEMBER_SF_COL + 1)
 
 # ISPF option 2 (Edit) entry panel fields
 EDIT_DSN_ROW = 5
@@ -790,8 +808,8 @@ def send_ispf_dsutil(
     _sba(buf, DSUTIL_OPTION_ROW, DSUTIL_OPTION_SF_COL)
     buf.append(SF)
     buf.append(field_attribute(protected=False, mdt=True))
-    _text(buf, f"{option[:2]:<2}")
-    _sba_sf(buf, DSUTIL_OPTION_ROW, DSUTIL_OPTION_SF_COL + 3, protected=True)
+    _text(buf, f"{option[:DSUTIL_OPTION_WIDTH]:<{DSUTIL_OPTION_WIDTH}}")
+    _sba_sf(buf, DSUTIL_OPTION_ROW, DSUTIL_OPTION_SF_COL + DSUTIL_OPTION_WIDTH + 1, protected=True)
 
     _normal(buf, 4, 1, "Data Set Name ===>")
     _sba(buf, DSUTIL_DSN_ROW, DSUTIL_DSN_SF_COL)
@@ -829,6 +847,82 @@ def send_ispf_dsutil(
 
     buf.append(SBA)
     buf.extend(encode_pack_addr(DSUTIL_OPTION_ROW, DSUTIL_OPTION_SF_COL + 1))
+    buf.append(IC)
+
+    _high(buf, 23, 0, "-" * 79)
+    buf.extend([IAC, EOR])
+    print("TX:", binascii.hexlify(buf))
+    client_socket.sendall(buf)
+
+
+def send_ispf_movecopy(
+    client_socket,
+    option: str = "C",
+    from_dsn: str = "",
+    from_member: str = "",
+    to_dsn: str = "",
+    to_member: str = "",
+    short_msg: str = None,
+):
+    """Send ISPF 3.3 Move/Copy Utility panel."""
+    buf = bytearray()
+    buf.append(0xF5)  # ERASE_WRITE
+    buf.extend(write_control_character(reset_mdts=True, keyboard_restore=True))
+
+    inner = " Move/Copy Utility "
+    pad = (79 - len(inner)) // 2
+    border = "-" * pad + inner + "-" * (79 - pad - len(inner))
+    _high(buf, 0, 0, border)
+
+    _normal(buf, 2, 1, "Option ===>")
+    _sba(buf, MOVECOPY_OPTION_ROW, MOVECOPY_OPTION_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{option[:2].upper():<2}")
+    _sba_sf(buf, MOVECOPY_OPTION_ROW, MOVECOPY_OPTION_SF_COL + 3, protected=True)
+
+    _normal(buf, 4, 3, "C  Copy data set or member(s)    CP Copy and print")
+    _normal(buf, 5, 3, "M  Move data set or member(s)    MP Move and print")
+
+    _normal(buf, 7, 1, "Specify source and target names, then press Enter")
+
+    _normal(buf, 9, 1, "From Data Set Name ===>")
+    _sba(buf, MOVECOPY_FROM_DSN_ROW, MOVECOPY_FROM_DSN_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{from_dsn[:44]:<44}")
+    _sba_sf(buf, MOVECOPY_FROM_DSN_ROW, MOVECOPY_FROM_DSN_SF_COL + 45, protected=True)
+
+    _normal(buf, 10, 1, "From Member    ===>")
+    _sba(buf, MOVECOPY_FROM_MEMBER_ROW, MOVECOPY_FROM_MEMBER_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{from_member[:8]:<8}")
+    _sba_sf(buf, MOVECOPY_FROM_MEMBER_ROW, MOVECOPY_FROM_MEMBER_SF_COL + 9, protected=True)
+
+    _normal(buf, 12, 1, "To   Data Set Name ===>")
+    _sba(buf, MOVECOPY_TO_DSN_ROW, MOVECOPY_TO_DSN_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{to_dsn[:44]:<44}")
+    _sba_sf(buf, MOVECOPY_TO_DSN_ROW, MOVECOPY_TO_DSN_SF_COL + 45, protected=True)
+
+    _normal(buf, 13, 1, "To   Member    ===>")
+    _sba(buf, MOVECOPY_TO_MEMBER_ROW, MOVECOPY_TO_MEMBER_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{to_member[:8]:<8}")
+    _sba_sf(buf, MOVECOPY_TO_MEMBER_ROW, MOVECOPY_TO_MEMBER_SF_COL + 9, protected=True)
+
+    _normal(buf, 16, 1, "Notes: Use DSN(MEMBER) or Member fields for PDS members")
+    _normal(buf, 17, 1, "Target data set must not exist for full data set move/copy")
+    _normal(buf, 18, 1, "Enter X or press PF3 to return to Utility Selection Panel")
+
+    if short_msg:
+        _high(buf, 3, 1, short_msg[:78])
+
+    buf.append(SBA)
+    buf.extend(encode_pack_addr(MOVECOPY_OPTION_ROW, MOVECOPY_OPTION_SF_COL + 1))
     buf.append(IC)
 
     _high(buf, 23, 0, "-" * 79)
@@ -1132,6 +1226,11 @@ UTILITY_LAYOUT = UtilityLayout(
     dsutil_dsn_addr=DSUTIL_DSN_ADDR,
     dsutil_new_dsn_addr=DSUTIL_NEW_DSN_ADDR,
     dsutil_type_addr=DSUTIL_TYPE_ADDR,
+    movecopy_option_addr=MOVECOPY_OPTION_ADDR,
+    movecopy_from_dsn_addr=MOVECOPY_FROM_DSN_ADDR,
+    movecopy_from_member_addr=MOVECOPY_FROM_MEMBER_ADDR,
+    movecopy_to_dsn_addr=MOVECOPY_TO_DSN_ADDR,
+    movecopy_to_member_addr=MOVECOPY_TO_MEMBER_ADDR,
     dslist_level_addr=DSLIST_LEVEL_ADDR,
     dslist_results_first_row=DSLIST_RESULTS_FIRST_ROW,
     dslist_results_max_rows=DSLIST_RESULTS_MAX_ROWS,
@@ -1150,6 +1249,7 @@ UTILITY_LAYOUT = UtilityLayout(
 
 UTILITY_ACTIONS = UtilityActions(
     send_ispf_dsutil=send_ispf_dsutil,
+    send_ispf_movecopy=send_ispf_movecopy,
     send_ispf_dslist=send_ispf_dslist,
     send_dataset_panel=send_dataset_panel,
     read_client_input=read_client_input,
@@ -1202,16 +1302,35 @@ def handle_client(client_socket, addr):
 
         # ISPF menu loop
         short_msg = None
+        pending_main_option = None
         while True:
-            send_ispf_menu(client_socket, userid, short_msg)
-            result = read_client_input(client_socket)
-            if result is None:
-                return
-            aid, cursor_addr, fields = result
-            print(f"AID={hex(aid)}, fields={fields}")
+            if pending_main_option:
+                aid_str = "Enter"
+                option = pending_main_option.strip().upper()
+                pending_main_option = None
+            else:
+                send_ispf_menu(client_socket, userid, short_msg)
+                result = read_client_input(client_socket)
+                if result is None:
+                    return
+                aid, cursor_addr, fields = result
+                print(f"AID={hex(aid)}, fields={fields}")
 
-            aid_str = aid_to_string(aid)
-            option = fields.get(ISPF_OPTION_ADDR, "").strip().upper()
+                aid_str = aid_to_string(aid)
+                option = fields.get(ISPF_OPTION_ADDR, "").strip().upper()
+            stacked_utils_option = None
+
+            if option.startswith("="):
+                option = option[1:].strip().upper()
+
+            if "." in option:
+                parts = [p for p in option.split(".") if p]
+                if len(parts) >= 2 and parts[0] == "3":
+                    option = "3"
+                    stacked_utils_option = parts[1]
+                else:
+                    short_msg = f"INVALID OPTION: {option}"
+                    continue
 
             if option == "X" or aid_str in ("PF3", "PF15"):
                 # Logoff — back to logon panel
@@ -1233,6 +1352,11 @@ def handle_client(client_socket, addr):
                     if entered_dsn:
                         edit_dsn = entered_dsn
 
+                    if edit_dsn.startswith("="):
+                        pending_main_option = edit_dsn[1:]
+                        short_msg = None
+                        break
+
                     if edit_dsn == "X" or edit_aid_str in ("PF3", "PF15"):
                         short_msg = None
                         break
@@ -1253,12 +1377,30 @@ def handle_client(client_socket, addr):
                     )
                     if launched.disconnect:
                         return
+                    if launched.jump_option:
+                        pending_main_option = launched.jump_option
+                        break
                     edit_msg = launched.message
 
-                short_msg = None
+                if not pending_main_option:
+                    short_msg = None
             elif option == "3":
                 utils_msg = None
+                pending_utils_option = stacked_utils_option
                 while True:
+                    if pending_utils_option:
+                        utility_result = handle_utility_option(
+                            option=pending_utils_option,
+                            client_socket=client_socket,
+                            actions=UTILITY_ACTIONS,
+                            layout=UTILITY_LAYOUT,
+                        )
+                        pending_utils_option = None
+                        if utility_result.disconnect:
+                            return
+                        utils_msg = utility_result.message
+                        continue
+
                     send_ispf_utils(client_socket, utils_msg)
                     utils_result = read_client_input(client_socket)
                     if utils_result is None:
@@ -1268,6 +1410,10 @@ def handle_client(client_socket, addr):
 
                     utils_aid_str = aid_to_string(utils_aid)
                     utils_option = utils_fields.get(ISPF_OPTION_ADDR, "").strip().upper()
+
+                    if utils_option.startswith("="):
+                        pending_main_option = utils_option[1:]
+                        break
 
                     if utils_option == "X" or utils_aid_str in ("PF3", "PF15"):
                         break
@@ -1280,9 +1426,13 @@ def handle_client(client_socket, addr):
                     )
                     if utility_result.disconnect:
                         return
+                    if utility_result.jump_option:
+                        pending_main_option = utility_result.jump_option
+                        break
                     utils_msg = utility_result.message
 
-                short_msg = None
+                if not pending_main_option:
+                    short_msg = None
             elif option in valid_opts:
                 short_msg = f"OPTION {option} NOT YET IMPLEMENTED"
             elif option:
