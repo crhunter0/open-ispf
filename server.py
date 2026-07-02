@@ -222,6 +222,18 @@ MOVECOPY_TO_MEMBER_ROW = 13
 MOVECOPY_TO_MEMBER_SF_COL = 19
 MOVECOPY_TO_MEMBER_ADDR = MOVECOPY_TO_MEMBER_ROW * 80 + (MOVECOPY_TO_MEMBER_SF_COL + 1)
 
+# Utility 3.5 JCL Submit panel fields
+JCLSUB_OPTION_ROW = 2
+JCLSUB_OPTION_SF_COL = 13
+JCLSUB_OPTION_WIDTH = 64
+JCLSUB_OPTION_ADDR = JCLSUB_OPTION_ROW * 80 + (JCLSUB_OPTION_SF_COL + 1)
+JCLSUB_DSN_ROW = 5
+JCLSUB_DSN_SF_COL = 19
+JCLSUB_DSN_ADDR = JCLSUB_DSN_ROW * 80 + (JCLSUB_DSN_SF_COL + 1)
+JCLSUB_MEMBER_ROW = 6
+JCLSUB_MEMBER_SF_COL = 19
+JCLSUB_MEMBER_ADDR = JCLSUB_MEMBER_ROW * 80 + (JCLSUB_MEMBER_SF_COL + 1)
+
 # ISPF option 2 (Edit) entry panel fields
 EDIT_DSN_ROW = 5
 EDIT_DSN_SF_COL = 19
@@ -530,10 +542,11 @@ def send_dataset_panel(
         if mode == "E"
         else "Commands: X=Exit COLS HEX SCROLL PAGE/CSR  PF3=End  PF7=Up  PF8=Down"
     )
-    if short_msg:
-        footer_text = f"{footer_text}  {short_msg}"[:79]
 
-    _normal(buf, 22, 1, footer_text)
+    if short_msg:
+        _high(buf, 21, 1, short_msg[:78])
+
+    _normal(buf, 22, 1, footer_text[:79])
     _high(buf, 23, 0, "-" * 79)
     buf.extend([IAC, EOR])
     print("TX:", binascii.hexlify(buf))
@@ -655,7 +668,7 @@ _UTILS_OPTIONS = [
     ("2", "Data Set      ", "Data set utility"),
     ("3", "Move/Copy     ", "Move or copy utility"),
     ("4", "DSLIST        ", "Data set list utility"),
-    ("5", "Reset         ", "Reset statistics utility"),
+    ("5", "JCL Submit    ", "Submit and run JCL jobs"),
     ("6", "Hardcopy      ", "Hardcopy utility"),
     ("7", "Outlist       ", "Output list utility"),
     ("8", "Catalog       ", "Catalog utility"),
@@ -923,6 +936,66 @@ def send_ispf_movecopy(
 
     buf.append(SBA)
     buf.extend(encode_pack_addr(MOVECOPY_OPTION_ROW, MOVECOPY_OPTION_SF_COL + 1))
+    buf.append(IC)
+
+    _high(buf, 23, 0, "-" * 79)
+    buf.extend([IAC, EOR])
+    print("TX:", binascii.hexlify(buf))
+    client_socket.sendall(buf)
+
+
+def send_ispf_jcl_submit(
+    client_socket,
+    option: str = "SUBMIT",
+    jcl_dsn: str = "",
+    jcl_member: str = "",
+    short_msg: str = None,
+):
+    """Send ISPF Utilities JCL Submit panel."""
+    buf = bytearray()
+    buf.append(0xF5)  # ERASE_WRITE
+    buf.extend(write_control_character(reset_mdts=True, keyboard_restore=True))
+
+    inner = " JCL Submit Utility "
+    pad = (79 - len(inner)) // 2
+    border = "-" * pad + inner + "-" * (79 - pad - len(inner))
+    _high(buf, 0, 0, border)
+
+    _normal(buf, 2, 1, "Option ===>")
+    _sba(buf, JCLSUB_OPTION_ROW, JCLSUB_OPTION_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{option[:JCLSUB_OPTION_WIDTH]:<{JCLSUB_OPTION_WIDTH}}")
+    _sba_sf(buf, JCLSUB_OPTION_ROW, JCLSUB_OPTION_SF_COL + JCLSUB_OPTION_WIDTH + 1, protected=True)
+
+    _normal(buf, 4, 1, "Enter SUBMIT and specify a JCL data set below")
+
+    _normal(buf, 5, 1, "JCL Data Set Name ===>")
+    _sba(buf, JCLSUB_DSN_ROW, JCLSUB_DSN_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{jcl_dsn[:44]:<44}")
+    _sba_sf(buf, JCLSUB_DSN_ROW, JCLSUB_DSN_SF_COL + 45, protected=True)
+
+    _normal(buf, 6, 1, "Member           ===>")
+    _sba(buf, JCLSUB_MEMBER_ROW, JCLSUB_MEMBER_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{jcl_member[:8]:<8}")
+    _sba_sf(buf, JCLSUB_MEMBER_ROW, JCLSUB_MEMBER_SF_COL + 9, protected=True)
+
+    _normal(buf, 9, 1, "Notes:")
+    _normal(buf, 10, 3, "- For PDS JCL libraries, member is required")
+    _normal(buf, 11, 3, "- EXEC PGM resolution searches SYS1.LOADLIB first")
+    _normal(buf, 12, 3, "- Job run artifacts are written under job_runs/")
+    _normal(buf, 14, 1, "Use = commands to jump from this panel (for example =3.4)")
+    _normal(buf, 18, 1, "Enter X or press PF3 to return to Utility Selection Panel")
+
+    if short_msg:
+        _high(buf, 3, 1, short_msg[:78])
+
+    buf.append(SBA)
+    buf.extend(encode_pack_addr(JCLSUB_OPTION_ROW, JCLSUB_OPTION_SF_COL + 1))
     buf.append(IC)
 
     _high(buf, 23, 0, "-" * 79)
@@ -1231,6 +1304,9 @@ UTILITY_LAYOUT = UtilityLayout(
     movecopy_from_member_addr=MOVECOPY_FROM_MEMBER_ADDR,
     movecopy_to_dsn_addr=MOVECOPY_TO_DSN_ADDR,
     movecopy_to_member_addr=MOVECOPY_TO_MEMBER_ADDR,
+    jcl_option_addr=JCLSUB_OPTION_ADDR,
+    jcl_dsn_addr=JCLSUB_DSN_ADDR,
+    jcl_member_addr=JCLSUB_MEMBER_ADDR,
     dslist_level_addr=DSLIST_LEVEL_ADDR,
     dslist_results_first_row=DSLIST_RESULTS_FIRST_ROW,
     dslist_results_max_rows=DSLIST_RESULTS_MAX_ROWS,
@@ -1250,6 +1326,7 @@ UTILITY_LAYOUT = UtilityLayout(
 UTILITY_ACTIONS = UtilityActions(
     send_ispf_dsutil=send_ispf_dsutil,
     send_ispf_movecopy=send_ispf_movecopy,
+    send_ispf_jcl_submit=send_ispf_jcl_submit,
     send_ispf_dslist=send_ispf_dslist,
     send_dataset_panel=send_dataset_panel,
     read_client_input=read_client_input,

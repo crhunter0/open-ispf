@@ -1,10 +1,12 @@
 import fnmatch
+import shutil
 from pathlib import Path
 from typing import Optional
 
 from app_config import BASE_DIR, TEXT_ENCODING
 
 from utilities.base import UtilityActions, UtilityLayout, UtilityResult
+from utilities.jcl_submit import submit_jcl
 
 
 def _dataset_display_geometry(layout: UtilityLayout, show_cols: bool, hex_mode: bool) -> tuple[int, int, int]:
@@ -74,6 +76,57 @@ def _entry_abs_path(entry: dict) -> Path:
     if candidate.is_absolute():
         return candidate
     return BASE_DIR / candidate
+
+
+def _split_dsn_and_member(dsn: str) -> tuple[str, str]:
+    text = str(dsn or "").strip().upper()
+    if text.endswith(")") and "(" in text:
+        base, member = text[:-1].split("(", 1)
+        return base.strip(), member.strip()
+    return text, ""
+
+
+def _submit_from_editor(actions: UtilityActions, selected: dict, lines: list, selected_cmd: str) -> str:
+    if selected_cmd != "E":
+        return "SUB VALID IN EDIT MODE ONLY"
+
+    save_error = actions.save_dataset_lines(selected, lines)
+    if save_error:
+        return save_error
+
+    submit_dsn, submit_member = _split_dsn_and_member(actions.normalize_dsn(selected.get("dsn", "")))
+    return submit_jcl(actions, submit_dsn, submit_member)
+
+
+def _delete_dataset_entry(actions: UtilityActions, catalog: list, selected: dict) -> str:
+    norm_dsn = actions.normalize_dsn(selected.get("dsn", ""))
+    if not norm_dsn:
+        return "INVALID DATA SET NAME"
+
+    entry_idx = -1
+    for idx, entry in enumerate(catalog):
+        if actions.normalize_dsn(entry.get("dsn", "")) == norm_dsn:
+            entry_idx = idx
+            break
+
+    if entry_idx == -1:
+        return f"DATA SET NOT FOUND: {norm_dsn}"
+
+    try:
+        entry_path = _entry_abs_path(catalog[entry_idx])
+        if entry_path.exists() and entry_path.is_dir():
+            shutil.rmtree(entry_path)
+        elif entry_path.exists() and entry_path.is_file():
+            entry_path.unlink()
+    except Exception as e:
+        return f"DELETE FAILED: {e}"
+
+    del catalog[entry_idx]
+    save_err = actions.save_catalog(catalog)
+    if save_err:
+        return save_err
+
+    return f"DELETED {norm_dsn}"
 
 
 def _list_pds_members(pds_entry: dict, member_pattern: str) -> tuple[list, str]:
@@ -457,6 +510,11 @@ def _run_dataset_editor_session(
         if ds_cmd in {"PAGE", "CSR"}:
             dslist_scroll = ds_cmd
             ds_msg = None
+            ds_cmd = ""
+            continue
+
+        if ds_aid_str not in {"PF3", "PF15"} and cmd_root in {"SUB", "SUBMIT"}:
+            ds_msg = _submit_from_editor(actions, selected, lines, selected_cmd)
             ds_cmd = ""
             continue
 
@@ -924,11 +982,11 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
             cmd = dl_fields.get(cmd_addr, "").strip().upper()
             if cmd:
                 cmd_count += 1
-                if cmd in {"B", "V", "E"} and selected is None:
+                if cmd in {"B", "V", "E", "D"} and selected is None:
                     selected = ds
                     selected_cmd = cmd
-                elif cmd not in {"B", "V", "E"}:
-                    dslist_msg = f"INVALID LINE CMD: {cmd} (USE B, V, OR E)"
+                elif cmd not in {"B", "V", "E", "D"}:
+                    dslist_msg = f"INVALID LINE CMD: {cmd} (USE B, V, E, OR D)"
                     selected = None
                     selected_cmd = None
                     break
@@ -936,6 +994,17 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
         if selected is not None:
             if cmd_count > 1:
                 dslist_msg = "ENTER ONLY ONE LINE COMMAND"
+                continue
+
+            if selected_cmd == "D":
+                selected_norm = actions.normalize_dsn(selected.get("dsn", ""))
+                dslist_msg = _delete_dataset_entry(actions, catalog, selected)
+                if dslist_msg.startswith("DELETED "):
+                    dslist_rows = [
+                        row
+                        for row in dslist_rows
+                        if actions.normalize_dsn(row.get("dsn", "")) != selected_norm
+                    ]
                 continue
 
             if actions.is_pds_like(selected):
@@ -1083,6 +1152,11 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
                 if ds_cmd in {"PAGE", "CSR"}:
                     dslist_scroll = ds_cmd
                     ds_msg = None
+                    ds_cmd = ""
+                    continue
+
+                if ds_aid_str not in {"PF3", "PF15"} and cmd_root in {"SUB", "SUBMIT"}:
+                    ds_msg = _submit_from_editor(actions, selected, lines, selected_cmd)
                     ds_cmd = ""
                     continue
 

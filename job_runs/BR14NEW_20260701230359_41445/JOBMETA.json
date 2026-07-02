@@ -1,0 +1,15 @@
+{
+  "job_name": "BR14NEW",
+  "return_code": 0,
+  "source_dsn": "GP5CRH.JCLLIB",
+  "source_member": "BR14NEW",
+  "step_count": 1,
+  "step_results": [
+    {
+      "step_name": "STEP1",
+      "rc": 0
+    }
+  ],
+  "run_dir": "/Users/chrishunter/vscode-workspace/open-ispf/job_runs/BR14NEW_20260701230359_41445",
+  "completed_at": "2026-07-01T23:03:59"
+}

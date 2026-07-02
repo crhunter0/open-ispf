@@ -1,0 +1,5 @@
+JCL emulator runtime started
+STEP STEP1 EXEC PGM=IEFBR14
+IEFBR14: deleted /Users/chrishunter/vscode-workspace/open-ispf/data/GP5CRH/BR14NEW_TEST.dat
+__STEP_RC__|STEP1|0
+JCL emulator runtime complete RC=0
