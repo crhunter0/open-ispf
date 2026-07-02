@@ -136,8 +136,8 @@
       "text_ccsid": "cp037"
     },
     {
-      "dsn": "GP5CRH.BR14NEW.TEST",
-      "path": "data/GP5CRH/BR14NEW_TEST.dat",
+      "dsn": "TESTUSER.STALECHK",
+      "path": "data/TESTUSER/STALECHK.dat",
       "org": "PS",
       "recfm": "FB",
       "lrecl": 80,

@@ -240,12 +240,16 @@ EDIT_DSN_SF_COL = 19
 EDIT_DSN_ADDR = EDIT_DSN_ROW * 80 + (EDIT_DSN_SF_COL + 1)
 
 # DSLIST panel: "Dsname Level ===>" input field at row 2, SF at col 19
+DSLIST_CMD_ROW = 1
+DSLIST_CMD_SF_COL = 13
+DSLIST_CMD_WIDTH = 64
+DSLIST_CMD_ADDR = DSLIST_CMD_ROW * 80 + (DSLIST_CMD_SF_COL + 1)
 DSLIST_LEVEL_ROW = 2
 DSLIST_LEVEL_SF_COL = 19
 DSLIST_LEVEL_ADDR = DSLIST_LEVEL_ROW * 80 + (DSLIST_LEVEL_SF_COL + 1)  # = 180
 DSLIST_RESULTS_FIRST_ROW = 7
 DSLIST_RESULTS_MAX_ROWS = 14
-DSLIST_CMD_SF_COL = 1
+DSLIST_LINE_CMD_SF_COL = 1
 
 # Dataset Browse/View/Edit panel layout
 DATASET_SCROLL_ROW = 2
@@ -527,10 +531,15 @@ def send_dataset_panel(
 
     if mode == "E":
         buf.append(SBA)
-        cursor_row = content_first_row + (3 if hex_mode else 0)
-        # Start cursor in the 6-char prefix command area (col 1) so line
-        # commands are entered reliably without extra cursor movement.
-        buf.extend(encode_pack_addr(cursor_row, DATASET_EDIT_LINE_NO_COL))
+        is_member_edit = "(" in dsn and ")" in dsn
+        if is_member_edit:
+            # For member edits, default to command line for consistency with ISPF workflows.
+            buf.extend(encode_pack_addr(DATASET_CMD_ROW, DATASET_CMD_SF_COL + 1))
+        else:
+            cursor_row = content_first_row + (3 if hex_mode else 0)
+            # Start cursor in the 6-char prefix command area (col 1) so line
+            # commands are entered reliably without extra cursor movement.
+            buf.extend(encode_pack_addr(cursor_row, DATASET_EDIT_LINE_NO_COL))
         buf.append(IC)
     else:
         buf.append(SBA)
@@ -1042,6 +1051,7 @@ def send_ispf_edit_entry(client_socket, dsn: str = "", short_msg: str = None):
 
 def send_ispf_dslist(
     client_socket,
+    command: str = "",
     level: str = "",
     rows=None,
     short_msg: str = None,
@@ -1059,6 +1069,14 @@ def send_ispf_dslist(
     border = "-" * pad + inner + "-" * (79 - pad - len(inner))
     _high(buf, 0, 0, border)
 
+    # Row 1: command line
+    _normal(buf, DSLIST_CMD_ROW, 1, "Command ===>")
+    _sba(buf, DSLIST_CMD_ROW, DSLIST_CMD_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{command[:DSLIST_CMD_WIDTH]:<{DSLIST_CMD_WIDTH}}")
+    _sba_sf(buf, DSLIST_CMD_ROW, DSLIST_CMD_SF_COL + DSLIST_CMD_WIDTH + 1, protected=True)
+
     # Row 2: "Dsname Level ===>" label + unprotected input field
     _normal(buf, 2, 1, "Dsname Level ===>")
     _sba(buf, DSLIST_LEVEL_ROW, DSLIST_LEVEL_SF_COL)
@@ -1067,9 +1085,9 @@ def send_ispf_dslist(
     _text(buf, f"{level[:44]:<44}")
     _sba_sf(buf, DSLIST_LEVEL_ROW, DSLIST_LEVEL_SF_COL + 45, protected=True)
 
-    # Position cursor in the level input field
+    # Position cursor in the command line field
     buf.append(SBA)
-    buf.extend(encode_pack_addr(DSLIST_LEVEL_ROW, DSLIST_LEVEL_SF_COL + 1))
+    buf.extend(encode_pack_addr(DSLIST_CMD_ROW, DSLIST_CMD_SF_COL + 1))
     buf.append(IC)
 
     if short_msg:
@@ -1083,11 +1101,11 @@ def send_ispf_dslist(
     for i, ds in enumerate(rows[:DSLIST_RESULTS_MAX_ROWS]):
         row = DSLIST_RESULTS_FIRST_ROW + i
 
-        _sba(buf, row, DSLIST_CMD_SF_COL)
+        _sba(buf, row, DSLIST_LINE_CMD_SF_COL)
         buf.append(SF)
         buf.append(field_attribute(protected=False, mdt=True))
         _text(buf, " ")
-        _sba_sf(buf, row, DSLIST_CMD_SF_COL + 2, protected=True)
+        _sba_sf(buf, row, DSLIST_LINE_CMD_SF_COL + 2, protected=True)
 
         dsn   = _normalize_dsn(ds.get("dsn", ""))[:35]
         org   = str(ds.get("org",   ""))[:3]
@@ -1098,7 +1116,7 @@ def send_ispf_dslist(
         _normal(buf, row, 4, f"  {dsn:<35}  {org:<3}  {recfm:<5} {lrecl:>5}  {mode:<6}")
 
     # Row 22: usage hint; Row 23: bottom border
-    hint = footer_hint or "Enter DSN pattern, or line cmd B/V/E. X or PF3 to return."
+    hint = footer_hint or "Use Command for jumps/X. Dsname Level is remembered. Line cmd B/V/E/D. PF3=return"
     _normal(buf, 22, 1, hint[:78])
     _high(buf, 23, 0, "-" * 79)
 
@@ -1307,10 +1325,11 @@ UTILITY_LAYOUT = UtilityLayout(
     jcl_option_addr=JCLSUB_OPTION_ADDR,
     jcl_dsn_addr=JCLSUB_DSN_ADDR,
     jcl_member_addr=JCLSUB_MEMBER_ADDR,
+    dslist_cmd_addr=DSLIST_CMD_ADDR,
     dslist_level_addr=DSLIST_LEVEL_ADDR,
     dslist_results_first_row=DSLIST_RESULTS_FIRST_ROW,
     dslist_results_max_rows=DSLIST_RESULTS_MAX_ROWS,
-    dslist_cmd_sf_col=DSLIST_CMD_SF_COL,
+    dslist_cmd_sf_col=DSLIST_LINE_CMD_SF_COL,
     dataset_scroll_addr=DATASET_SCROLL_ADDR,
     dataset_cmd_addr=DATASET_CMD_ADDR,
     dataset_lines_first_row=DATASET_LINES_FIRST_ROW,

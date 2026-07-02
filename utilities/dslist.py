@@ -9,6 +9,9 @@ from utilities.base import UtilityActions, UtilityLayout, UtilityResult
 from utilities.jcl_submit import submit_jcl
 
 
+_LAST_DSLIST_LEVEL = ""
+
+
 def _dataset_display_geometry(layout: UtilityLayout, show_cols: bool, hex_mode: bool) -> tuple[int, int, int]:
     panel_first_row = layout.dataset_lines_first_row + (1 if show_cols else 0)
     data_row_start = panel_first_row + 1
@@ -194,10 +197,11 @@ def _next_auto_member_name(pds_path: Path) -> str:
     return "NEW9999"
 
 
-def _extract_jump_option(value: str) -> str:
-    text = str(value or "").strip().upper()
-    if text.startswith("=") and len(text) > 1:
-        return text[1:]
+def _extract_jump_option(*values: str) -> str:
+    for value in values:
+        text = str(value or "").strip().upper()
+        if text.startswith("=") and len(text) > 1:
+            return text[1:]
     return ""
 
 
@@ -233,13 +237,14 @@ def _run_pds_member_list_session(
 
         member_aid, member_cursor_addr, member_fields = member_result
         member_aid_str = actions.aid_to_string(member_aid)
+        entered_cmd = member_fields.get(layout.dslist_cmd_addr, "").strip().upper()
         entered_level = member_fields.get(layout.dslist_level_addr, "").strip().upper()
 
-        jump_option = _extract_jump_option(entered_level)
+        jump_option = _extract_jump_option(entered_cmd, entered_level)
         if jump_option:
             return UtilityResult(message=None, jump_option=jump_option)
 
-        if entered_level == "X" or member_aid_str in ("PF3", "PF15"):
+        if entered_cmd == "X" or entered_level == "X" or member_aid_str in ("PF3", "PF15"):
             return UtilityResult(message=None)
 
         # 3270 emulator/key mapping differences can send non-Enter AIDs for
@@ -942,17 +947,24 @@ def edit_dataset_by_name(client_socket, actions: UtilityActions, layout: Utility
 
 
 def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout) -> UtilityResult:
-    dslist_level = ""
+    global _LAST_DSLIST_LEVEL
+
+    dslist_cmd = ""
+    dslist_level = _LAST_DSLIST_LEVEL
     dslist_rows = []
     dslist_msg = None
     dslist_scroll = "PAGE"
     dslist_show_cols = False
     dslist_hex_mode = False
-    catalog = actions.load_catalog()
-
     while True:
+        # Keep the displayed list in sync with catalog changes made by utilities/edit sessions.
+        catalog = actions.load_catalog()
+        if dslist_level:
+            dslist_rows = actions.search_catalog(catalog, dslist_level)
+
         actions.send_ispf_dslist(
             client_socket,
+            command=dslist_cmd,
             level=dslist_level,
             rows=dslist_rows,
             short_msg=dslist_msg,
@@ -965,14 +977,24 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
         print(f"AID={hex(dl_aid)}, fields={dl_fields}")
 
         dl_aid_str = actions.aid_to_string(dl_aid)
-        dl_entered = dl_fields.get(layout.dslist_level_addr, "").strip().upper()
+        dl_cmd_entered = dl_fields.get(layout.dslist_cmd_addr, "").strip().upper()
+        dl_level_entered = dl_fields.get(layout.dslist_level_addr, "").strip().upper()
+        dslist_cmd = ""
 
-        jump_option = _extract_jump_option(dl_entered)
+        jump_option = _extract_jump_option(dl_cmd_entered, dl_level_entered)
         if jump_option:
             return UtilityResult(message=None, jump_option=jump_option)
 
-        if dl_entered == "X" or dl_aid_str in ("PF3", "PF15"):
+        if dl_cmd_entered == "X" or (not dl_cmd_entered and dl_level_entered == "X") or dl_aid_str in ("PF3", "PF15"):
             return UtilityResult(message=None)
+
+        if dl_level_entered:
+            dslist_level = dl_level_entered
+            _LAST_DSLIST_LEVEL = dslist_level
+
+        if dl_cmd_entered and dl_cmd_entered not in {""}:
+            dslist_msg = f"UNKNOWN COMMAND: {dl_cmd_entered}"
+            continue
 
         selected = None
         selected_cmd = None
@@ -1555,11 +1577,10 @@ def handle_dslist(client_socket, actions: UtilityActions, layout: UtilityLayout)
                     ds_cmd = ""
             continue
 
-        if not dl_entered:
+        if not dslist_level:
             dslist_msg = "ENTER DSNAME LEVEL PATTERN (EX: IBMUSER.*)"
             continue
 
-        dslist_level = dl_entered
         dslist_rows = actions.search_catalog(catalog, dslist_level)
         if dslist_rows:
             dslist_msg = f"{len(dslist_rows)} DATA SET(S) LISTED"

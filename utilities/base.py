@@ -17,6 +17,7 @@ class UtilityLayout:
     jcl_option_addr: int
     jcl_dsn_addr: int
     jcl_member_addr: int
+    dslist_cmd_addr: int
     dslist_level_addr: int
     dslist_results_first_row: int
     dslist_results_max_rows: int
