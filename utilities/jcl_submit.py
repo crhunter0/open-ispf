@@ -11,6 +11,12 @@ from app_config import BASE_DIR
 from utilities.base import UtilityActions, UtilityLayout, UtilityResult
 
 
+DEFAULT_RUNTIME_MODE = "native-argv"
+ENV_RUNTIME_MODES = {"gnucobol-env", "dual"}
+VALID_RUNTIME_MODES = {DEFAULT_RUNTIME_MODE, *ENV_RUNTIME_MODES}
+COBOL_MODULE_SUFFIXES = {".so", ".dylib", ".dll"}
+
+
 def _extract_jump_option(*values: str) -> str:
     for value in values:
         text = str(value or "").strip().upper()
@@ -156,6 +162,13 @@ def _extract_keyword_value(text: str, keyword: str) -> str:
     return text[start:idx].strip()
 
 
+def _unquote_value(value: str) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1]
+    return text
+
+
 def _parse_jcl_steps(jcl_text: str) -> list[dict]:
     steps = []
     current_step = None
@@ -163,9 +176,11 @@ def _parse_jcl_steps(jcl_text: str) -> list[dict]:
     for name, statement in _iter_jcl_statements(jcl_text):
         exec_match = re.match(r"^EXEC\b.*\bPGM\s*=\s*([A-Z0-9@$#_-]{1,64})", statement, re.IGNORECASE)
         if exec_match:
+            parm_raw = _extract_keyword_value(statement, "PARM")
             current_step = {
                 "step_name": name[:8].upper(),
                 "pgm": exec_match.group(1).upper(),
+                "parm": _unquote_value(parm_raw),
                 "dds": [],
             }
             steps.append(current_step)
@@ -212,6 +227,8 @@ def _resolve_program_path(loadlib_path: Path, pgm: str, is_windows: bool) -> Pat
     candidates = [pgm]
     if is_windows:
         candidates.extend([f"{pgm}.EXE", f"{pgm}.BAT", f"{pgm}.CMD"])
+    else:
+        candidates.extend([f"{pgm}.so", f"{pgm}.dylib"])
 
     for candidate in candidates:
         exact = loadlib_path / candidate
@@ -222,6 +239,56 @@ def _resolve_program_path(loadlib_path: Path, pgm: str, is_windows: bool) -> Pat
             return ci
 
     return None
+
+
+def _normalize_runtime_mode(raw_value: str) -> str:
+    mode = str(raw_value or "").strip().lower()
+    if mode in VALID_RUNTIME_MODES:
+        return mode
+    return DEFAULT_RUNTIME_MODE
+
+
+def _load_program_metadata(pgm_path: Path) -> dict:
+    if pgm_path is None:
+        return {}
+
+    metadata_path = pgm_path.with_suffix(".meta.json")
+    if not metadata_path.exists() or not metadata_path.is_file():
+        return {}
+
+    try:
+        loaded = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _resolve_runtime_mode(pgm_path: Path) -> str:
+    metadata = _load_program_metadata(pgm_path)
+    return _normalize_runtime_mode(metadata.get("runtime_mode", DEFAULT_RUNTIME_MODE))
+
+
+def _sanitize_env_name(ddname: str) -> str:
+    cleaned = re.sub(r"[^A-Z0-9_]", "_", str(ddname or "").strip().upper())
+    if not cleaned:
+        return "DD_UNKNOWN"
+    if cleaned[0].isdigit():
+        return f"DD_{cleaned}"
+    return cleaned
+
+
+def _should_use_cobcrun(step: dict) -> bool:
+    runtime_mode = _normalize_runtime_mode(step.get("runtime_mode", DEFAULT_RUNTIME_MODE))
+    return runtime_mode in ENV_RUNTIME_MODES
+
+
+def _cobcrun_module_name(pgm_path: str) -> str:
+    path = Path(str(pgm_path or "").strip())
+    suffix = path.suffix.lower()
+    if suffix in COBOL_MODULE_SUFFIXES:
+        return path.stem
+    return path.name
 
 
 def _quote_for_bash(value: str) -> str:
@@ -235,6 +302,10 @@ def _quote_for_cmd(value: str) -> str:
 
 def _build_step_command_args(step: dict) -> list[str]:
     args = []
+    parm = str(step.get("parm", "")).strip()
+    if parm:
+        args.extend(["--parm", parm])
+
     for dd in step.get("dds", []):
         payload = "|".join(
             [
@@ -249,6 +320,21 @@ def _build_step_command_args(step: dict) -> list[str]:
     return args
 
 
+def _build_step_env(step: dict) -> dict[str, str]:
+    runtime_mode = _normalize_runtime_mode(step.get("runtime_mode", DEFAULT_RUNTIME_MODE))
+    if runtime_mode not in ENV_RUNTIME_MODES:
+        return {}
+
+    env = {}
+    for dd in step.get("dds", []):
+        path = str(dd.get("path", "")).strip()
+        if not path:
+            continue
+        env_name = _sanitize_env_name(dd.get("ddname", ""))
+        env[env_name] = path
+    return env
+
+
 def _build_bash_script(steps: list[dict]) -> str:
     lines = [
         "#!/usr/bin/env bash",
@@ -261,18 +347,33 @@ def _build_bash_script(steps: list[dict]) -> str:
         step_name = step.get("step_name", "STEP")
         pgm = step.get("pgm", "")
         pgm_path = step.get("pgm_path", "")
+        use_cobcrun = _should_use_cobcrun(step)
         args = _build_step_command_args(step)
         args_str = " ".join(_quote_for_bash(a) for a in args)
+        env_map = _build_step_env(step)
+        if use_cobcrun and pgm_path:
+            env_map["COB_LIBRARY_PATH"] = str(Path(pgm_path).parent)
+        env_str = " ".join(f"{name}={_quote_for_bash(value)}" for name, value in sorted(env_map.items()))
+        runner_cmd = "cobcrun" if use_cobcrun else _quote_for_bash(pgm_path)
+        runner_target = _quote_for_bash(_cobcrun_module_name(pgm_path)) if use_cobcrun else ""
+        invoke_parts = [part for part in [env_str, runner_cmd, runner_target, args_str] if part]
+        invoke_cmd = " ".join(invoke_parts)
+        if use_cobcrun:
+            check_expr = f'command -v cobcrun >/dev/null 2>&1 && [[ -f {_quote_for_bash(pgm_path)} ]]'
+            missing_msg = f'COBCRUN NOT FOUND OR MODULE MISSING: {pgm}'
+        else:
+            check_expr = f'[[ -x {_quote_for_bash(pgm_path)} ]]'
+            missing_msg = f'PGM NOT FOUND OR NOT EXECUTABLE: {pgm}'
 
         lines.extend([
             f'echo "STEP {step_name} EXEC PGM={pgm}"',
-            f'if [[ -x {_quote_for_bash(pgm_path)} ]]; then',
-            f'  {_quote_for_bash(pgm_path)} {args_str}'.rstrip(),
+            f'if {check_expr}; then',
+            f"  {invoke_cmd}".rstrip(),
             "  step_rc=$?",
             f'  echo "__STEP_RC__|{step_name}|$step_rc"',
             "  if [[ $step_rc -ne 0 ]]; then RC=$step_rc; fi",
             "else",
-            f'  echo "PGM NOT FOUND OR NOT EXECUTABLE: {pgm}"',
+            f'  echo "{missing_msg}"',
             f'  echo "__STEP_RC__|{step_name}|12"',
             "  RC=12",
             "fi",
@@ -297,18 +398,39 @@ def _build_windows_script(steps: list[dict]) -> str:
         step_name = step.get("step_name", "STEP")
         pgm = step.get("pgm", "")
         pgm_path = step.get("pgm_path", "")
+        use_cobcrun = _should_use_cobcrun(step)
         args = _build_step_command_args(step)
         args_str = " ".join(_quote_for_cmd(a) for a in args)
+        env_map = _build_step_env(step)
+        if use_cobcrun and pgm_path:
+            env_map["COB_LIBRARY_PATH"] = str(Path(pgm_path).parent)
+        env_setup = []
+        if env_map:
+            for name, value in sorted(env_map.items()):
+                safe_value = str(value).replace('"', '""')
+                env_setup.append(f'set "{name}={safe_value}"')
+
+        runner_cmd = "cobcrun" if use_cobcrun else _quote_for_cmd(pgm_path)
+        runner_target = _quote_for_cmd(_cobcrun_module_name(pgm_path)) if use_cobcrun else ""
+        run_line = " ".join(part for part in [runner_cmd, runner_target, args_str] if part).rstrip()
+
+        if env_setup:
+            runner_parts = env_setup + [run_line]
+            step_runner = "cmd.exe /v:on /c \"" + " & ".join(runner_parts) + "\""
+        else:
+            step_runner = run_line
+
+        missing_msg = f"COBCRUN NOT FOUND OR MODULE MISSING: {pgm}" if use_cobcrun else f"PGM NOT FOUND OR NOT EXECUTABLE: {pgm}"
 
         lines.extend([
             f"echo STEP {step_name} EXEC PGM={pgm}",
             f"if exist {_quote_for_cmd(pgm_path)} (",
-            f"  {_quote_for_cmd(pgm_path)} {args_str}".rstrip(),
+            f"  {step_runner}".rstrip(),
             "  set STEP_RC=!errorlevel!",
             f"  echo __STEP_RC__|{step_name}|!STEP_RC!",
             "  if !STEP_RC! neq 0 set RC=!STEP_RC!",
             ") else (",
-            f"  echo PGM NOT FOUND OR NOT EXECUTABLE: {pgm}",
+            f"  echo {missing_msg}",
             f"  echo __STEP_RC__|{step_name}|12",
             "  set RC=12",
             ")",
@@ -391,12 +513,32 @@ def _write_spool_files(run_dir: Path, job_name: str, rc: int, stdout: str, stder
 
 
 def _resolve_dd_paths(actions: UtilityActions, catalog: list, step: dict, known_new_dsns: set[str]) -> tuple[dict, str]:
+    def _split_dsn_member(value: str) -> tuple[str, str]:
+        text = str(value or "").strip().upper()
+        if text.endswith(")") and "(" in text:
+            base, member = text[:-1].split("(", 1)
+            return base.strip(), member.strip()
+        return text, ""
+
     for dd in step.get("dds", []):
         dsn = actions.normalize_dsn(dd.get("dsn", ""))
         dd["dsn"] = dsn
         dd["path"] = ""
 
         if not dsn:
+            continue
+
+        base_dsn, member = _split_dsn_member(dsn)
+        if member:
+            base_entry = _find_entry(catalog, base_dsn, actions.normalize_dsn)
+            if base_entry is None:
+                return step, f"DD DSN NOT FOUND IN CATALOG: {base_dsn}"
+            if not actions.is_pds_like(base_entry):
+                return step, f"DD MEMBER REQUIRES PARTITIONED DATA SET: {dsn}"
+            member_path = _entry_abs_path(base_entry) / member
+            if not member_path.exists() or not member_path.is_file():
+                return step, f"DD MEMBER NOT FOUND: {dsn}"
+            dd["path"] = str(member_path)
             continue
 
         entry = _find_entry(catalog, dsn, actions.normalize_dsn)
@@ -500,6 +642,7 @@ def submit_jcl(actions: UtilityActions, jcl_dsn: str, jcl_member: str = "") -> s
         pgm = step.get("pgm", "")
         pgm_path = _resolve_program_path(loadlib_path, pgm, is_windows)
         step["pgm_path"] = str(pgm_path) if pgm_path is not None else ""
+        step["runtime_mode"] = _resolve_runtime_mode(pgm_path)
 
     script_text = _build_windows_script(steps) if is_windows else _build_bash_script(steps)
 

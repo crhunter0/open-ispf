@@ -1,0 +1,15 @@
+{
+  "job_name": "ENVTEST",
+  "return_code": 0,
+  "source_dsn": "GP5CRH.JCLLIB",
+  "source_member": "ENVTEST",
+  "step_count": 1,
+  "step_results": [
+    {
+      "step_name": "STEP1",
+      "rc": 0
+    }
+  ],
+  "run_dir": "/Users/chrishunter/vscode-workspace/open-ispf/job_runs/ENVTEST_20260705065246_86553",
+  "completed_at": "2026-07-05T06:52:46"
+}

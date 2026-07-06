@@ -143,6 +143,33 @@
       "lrecl": 80,
       "content_mode": "text",
       "text_ccsid": "cp037"
+    },
+    {
+      "dsn": "GP5CRH.BR14NEW.TEST",
+      "path": "data/GP5CRH/BR14NEW_TEST.dat",
+      "org": "PS",
+      "recfm": "FB",
+      "lrecl": 80,
+      "content_mode": "text",
+      "text_ccsid": "cp037"
+    },
+    {
+      "dsn": "GP5CRH.COBSRC",
+      "path": "data/GP5CRH/COBSRC",
+      "org": "PO",
+      "recfm": "FB",
+      "lrecl": 80,
+      "content_mode": "text",
+      "text_ccsid": "cp037"
+    },
+    {
+      "dsn": "GP5CRH.COPYLIB",
+      "path": "data/GP5CRH/COPYLIB",
+      "org": "PO",
+      "recfm": "FB",
+      "lrecl": 80,
+      "content_mode": "text",
+      "text_ccsid": "cp037"
     }
   ]
 }

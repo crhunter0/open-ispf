@@ -114,6 +114,52 @@ Notes:
 - Entries with org PO/POE are treated as PDS-like and currently return not implemented for member handling.
 - content_mode binary is recognized but browse/save is not implemented yet.
 
+## JCL Runtime Metadata
+
+Programs resolved from `SYS1.LOADLIB` can optionally have a sidecar metadata file named `<PGM>.meta.json` beside the executable.
+
+Example:
+
+```json
+{
+	"runtime_mode": "gnucobol-env"
+}
+```
+
+Supported `runtime_mode` values:
+
+- `native-argv`: default behavior. DD bindings are passed only as `--dd` arguments.
+- `gnucobol-env`: DD bindings are also exported as step-local environment variables such as `SYSIN=/path/to/file`.
+- `dual`: same as `gnucobol-env` today, while preserving the existing `--dd` argument flow.
+
+Environment-variable DD bindings are scoped per JCL step and do not persist across later steps in the same job.
+
+## COBCOMP Compiler Utility
+
+`COBCOMP` is installed into `SYS1.LOADLIB` by `system_program_sources/build.sh` and `system_program_sources/build.bat`.
+
+It is designed to be called from JCL as a normal program step:
+
+```jcl
+//STEP1    EXEC PGM=COBCOMP,PARM=''
+//SYSIN    DD  DSN=GP5CRH.COBSRC(HELLO)
+//SYSLIB   DD  DSN=GP5CRH.COPYLIB,DISP=SHR
+//SYSLMOD  DD  DSN=SYS1.LOADLIB,DISP=SHR
+```
+
+DD contract:
+
+- `SYSIN`: required COBOL source member (`DSN(member)`).
+- `SYSLIB`: optional one or more copybook libraries. Each `SYSLIB` DD is mapped to a `cobc -I <path>` include search path.
+- `SYSLMOD`: optional output load library path. Defaults to the current loadlib folder when omitted.
+
+Behavior:
+
+- `EXEC PARM=` is forwarded to `COBCOMP` as `--parm` and then appended to the `cobc` command line.
+- Source and copybook members are staged from dataset storage and decoded to UTF-8 before compile, which allows EBCDIC-backed catalogs to compile with `cobc`.
+- Output is compiled as a dynamic module (`cobc -m`) for `cobcrun` execution by module name.
+- A sidecar metadata file `<module>.meta.json` is written with `runtime_mode=gnucobol-env` so JCL steps use environment DD bindings at runtime.
+
 ## Project Layout
 
 - server.py: TN3270 protocol handling, panel rendering, session loop.
