@@ -8,6 +8,7 @@ from datetime import datetime
 from enum import Enum
 from ispf_utility_handlers import UtilityActions, UtilityLayout, handle_utility_option
 from utilities.dslist import edit_dataset_by_name
+from utilities.jcl_submit import cancel_job, get_job, get_job_sections, list_jobs, purge_job, refresh_job_registry, set_default_submit_owner
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -254,6 +255,23 @@ JCLSUB_DSN_ADDR = JCLSUB_DSN_ROW * 80 + (JCLSUB_DSN_SF_COL + 1)
 JCLSUB_MEMBER_ROW = 6
 JCLSUB_MEMBER_SF_COL = 19
 JCLSUB_MEMBER_ADDR = JCLSUB_MEMBER_ROW * 80 + (JCLSUB_MEMBER_SF_COL + 1)
+
+# SDSF panel fields
+SDSF_CMD_ROW = 1
+SDSF_CMD_SF_COL = 13
+SDSF_CMD_WIDTH = 64
+SDSF_CMD_ADDR = SDSF_CMD_ROW * 80 + (SDSF_CMD_SF_COL + 1)
+SDSF_PRE_ROW = 2
+SDSF_PRE_SF_COL = 13
+SDSF_PRE_WIDTH = 16
+SDSF_PRE_ADDR = SDSF_PRE_ROW * 80 + (SDSF_PRE_SF_COL + 1)
+SDSF_OWNER_ROW = 2
+SDSF_OWNER_SF_COL = 43
+SDSF_OWNER_WIDTH = 12
+SDSF_OWNER_ADDR = SDSF_OWNER_ROW * 80 + (SDSF_OWNER_SF_COL + 1)
+SDSF_RESULTS_FIRST_ROW = 6
+SDSF_RESULTS_MAX_ROWS = 14
+SDSF_LINE_CMD_SF_COL = 1
 
 # ISPF option 2 (Edit) entry panel fields
 EDIT_DSN_ROW = 5
@@ -688,6 +706,7 @@ _ISPF_OPTIONS = [
     ("5", "Batch         ", "Submit job for language processing"),
     ("6", "Command       ", "Enter TSO or Workstation commands"),
     ("7", "Dialog Test   ", "Perform dialog testing"),
+    ("S", "SDSF          ", "System Display and Search Facility"),
     ("9", "IBM Products  ", "IBM program development products"),
     ("10", "SCLM          ", "SW Configuration Library Manager"),
     ("11", "Workplace     ", "ISPF Object/Action Workplace"),
@@ -1148,6 +1167,441 @@ def send_ispf_dslist(
     client_socket.sendall(buf)
 
 
+def _sdsf_metric_strings(job: dict) -> tuple[str, str, str]:
+    metrics = job.get("runtime_metrics", {}) if isinstance(job, dict) else {}
+    cpu_val = metrics.get("cpu_percent") if isinstance(metrics, dict) else None
+    mem_val = metrics.get("mem_bytes") if isinstance(metrics, dict) else None
+    io_r = metrics.get("io_read_bytes") if isinstance(metrics, dict) else None
+    io_w = metrics.get("io_write_bytes") if isinstance(metrics, dict) else None
+
+    if cpu_val is None:
+        cpu_text = "N/A"
+    else:
+        cpu_text = f"{float(cpu_val):.1f}"
+
+    if mem_val is None:
+        mem_text = "N/A"
+    else:
+        mem_text = f"{int(mem_val) / (1024 * 1024):.1f}"
+
+    if io_r is None and io_w is None:
+        io_text = "N/A"
+    else:
+        total_io = int(io_r or 0) + int(io_w or 0)
+        io_text = f"{total_io // 1024}"
+
+    return cpu_text, mem_text, io_text
+
+
+def send_ispf_sdsf(
+    client_socket,
+    userid: str,
+    command: str = "ST",
+    pre_filter: str = "*",
+    owner_filter: str = "",
+    rows=None,
+    short_msg: str = None,
+):
+    rows = rows or []
+    owner_display = owner_filter or userid
+
+    buf = bytearray()
+    buf.append(0xF5)
+    buf.extend(write_control_character(reset_mdts=True, keyboard_restore=True))
+
+    inner = " SDSF STATUS DISPLAY "
+    pad = (79 - len(inner)) // 2
+    border = "-" * pad + inner + "-" * (79 - pad - len(inner))
+    _high(buf, 0, 0, border)
+
+    _normal(buf, SDSF_CMD_ROW, 1, "Command ===>")
+    _sba(buf, SDSF_CMD_ROW, SDSF_CMD_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{command[:SDSF_CMD_WIDTH]:<{SDSF_CMD_WIDTH}}")
+    _sba_sf(buf, SDSF_CMD_ROW, SDSF_CMD_SF_COL + SDSF_CMD_WIDTH + 1, protected=True)
+
+    _normal(buf, SDSF_PRE_ROW, 1, "PRE   ===>")
+    _sba(buf, SDSF_PRE_ROW, SDSF_PRE_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{pre_filter[:SDSF_PRE_WIDTH]:<{SDSF_PRE_WIDTH}}")
+    _sba_sf(buf, SDSF_PRE_ROW, SDSF_PRE_SF_COL + SDSF_PRE_WIDTH + 1, protected=True)
+
+    _normal(buf, SDSF_OWNER_ROW, 31, "OWNER ===>")
+    _sba(buf, SDSF_OWNER_ROW, SDSF_OWNER_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, f"{owner_display[:SDSF_OWNER_WIDTH]:<{SDSF_OWNER_WIDTH}}")
+    _sba_sf(buf, SDSF_OWNER_ROW, SDSF_OWNER_SF_COL + SDSF_OWNER_WIDTH + 1, protected=True)
+
+    if short_msg:
+        _high(buf, 3, 1, short_msg[:78])
+
+    _normal(buf, 4, 1, "Use ST (all jobs) or DA (active jobs). Line cmds: S detail  ? sections  C cancel  P purge")
+    _normal(buf, 5, 1, "Cmd  JobID     JobName  Owner    St       RC   PID     CPU%  MEMMB   IOKB")
+
+    for i, job in enumerate(rows[:SDSF_RESULTS_MAX_ROWS]):
+        row = SDSF_RESULTS_FIRST_ROW + i
+        _sba(buf, row, SDSF_LINE_CMD_SF_COL)
+        buf.append(SF)
+        buf.append(field_attribute(protected=False, mdt=True))
+        _text(buf, "  ")
+        _sba_sf(buf, row, SDSF_LINE_CMD_SF_COL + 3, protected=True)
+
+        cpu_text, mem_text, io_text = _sdsf_metric_strings(job)
+        job_id = str(job.get("job_id", ""))[:9]
+        job_name = str(job.get("job_name", ""))[:8]
+        owner = str(job.get("owner", ""))[:8]
+        status = str(job.get("status", ""))[:8]
+        rc_val = job.get("return_code")
+        rc_text = "----" if rc_val is None else str(rc_val)[:4]
+        pid_text = str(job.get("pid", ""))[:7]
+
+        line = f"  {job_id:<9} {job_name:<8} {owner:<8} {status:<8} {rc_text:>4} {pid_text:<7} {cpu_text:>5} {mem_text:>6} {io_text:>6}"
+        _normal(buf, row, 4, line[:75])
+
+    _normal(buf, 22, 1, "X/PF3=Exit  PF7/PF8 reserved for viewer panels")
+    _high(buf, 23, 0, "-" * 79)
+
+    buf.append(SBA)
+    buf.extend(encode_pack_addr(SDSF_CMD_ROW, SDSF_CMD_SF_COL + 1))
+    buf.append(IC)
+    buf.extend([IAC, EOR])
+    print("TX:", binascii.hexlify(buf))
+    client_socket.sendall(buf)
+
+
+def send_ispf_sdsf_sections(client_socket, job_id: str, short_msg: str = None):
+    buf = bytearray()
+    buf.append(0xF5)
+    buf.extend(write_control_character(reset_mdts=True, keyboard_restore=True))
+
+    inner = f" SDSF SECTIONS {job_id[:9]} "
+    pad = (79 - len(inner)) // 2
+    border = "-" * pad + inner + "-" * (79 - pad - len(inner))
+    _high(buf, 0, 0, border)
+
+    _normal(buf, SDSF_CMD_ROW, 1, "Command ===>")
+    _sba(buf, SDSF_CMD_ROW, SDSF_CMD_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, " " * SDSF_CMD_WIDTH)
+    _sba_sf(buf, SDSF_CMD_ROW, SDSF_CMD_SF_COL + SDSF_CMD_WIDTH + 1, protected=True)
+
+    if short_msg:
+        _high(buf, 3, 1, short_msg[:78])
+
+    _normal(buf, 4, 1, "Line cmd S to open a section")
+    _normal(buf, 5, 1, "Cmd  Section     Description")
+    _normal(buf, 6, 4, "     JESMSG      JES message log")
+    _normal(buf, 7, 4, "     JCL         Submitted JCL text")
+    _normal(buf, 8, 4, "     SYSOUT      Program standard output")
+    _normal(buf, 9, 4, "     SYSERR      Program standard error")
+    _normal(buf, 10, 4, "     JOBMETA     Job metadata JSON")
+
+    for row in (6, 7, 8, 9, 10):
+        _sba(buf, row, SDSF_LINE_CMD_SF_COL)
+        buf.append(SF)
+        buf.append(field_attribute(protected=False, mdt=True))
+        _text(buf, " ")
+        _sba_sf(buf, row, SDSF_LINE_CMD_SF_COL + 2, protected=True)
+
+    _normal(buf, 22, 1, "X/PF3=Back  Enter section name in command line is also supported")
+    _high(buf, 23, 0, "-" * 79)
+
+    buf.append(SBA)
+    buf.extend(encode_pack_addr(SDSF_CMD_ROW, SDSF_CMD_SF_COL + 1))
+    buf.append(IC)
+    buf.extend([IAC, EOR])
+    print("TX:", binascii.hexlify(buf))
+    client_socket.sendall(buf)
+
+
+def send_ispf_text_viewer(client_socket, title: str, lines: list[str], page: int = 0, short_msg: str = None):
+    view_rows = 18
+    max_start = max(0, len(lines) - view_rows)
+    page = max(0, min(page, max_start))
+
+    buf = bytearray()
+    buf.append(0xF5)
+    buf.extend(write_control_character(reset_mdts=True, keyboard_restore=True))
+
+    inner = f" {title[:45]} "
+    pad = (79 - len(inner)) // 2
+    border = "-" * pad + inner + "-" * (79 - pad - len(inner))
+    _high(buf, 0, 0, border)
+
+    _normal(buf, SDSF_CMD_ROW, 1, "Command ===>")
+    _sba(buf, SDSF_CMD_ROW, SDSF_CMD_SF_COL)
+    buf.append(SF)
+    buf.append(field_attribute(protected=False, mdt=True))
+    _text(buf, " " * SDSF_CMD_WIDTH)
+    _sba_sf(buf, SDSF_CMD_ROW, SDSF_CMD_SF_COL + SDSF_CMD_WIDTH + 1, protected=True)
+
+    _normal(buf, 2, 1, f"Line {page + 1} of {max(1, len(lines))}")
+    if short_msg:
+        _high(buf, 2, 30, short_msg[:48])
+
+    for i in range(view_rows):
+        row = 3 + i
+        text = ""
+        if page + i < len(lines):
+            text = lines[page + i]
+        _normal(buf, row, 1, f"{text[:78]:<78}")
+
+    _normal(buf, 22, 1, "PF7=Up  PF8=Down  X/PF3=Back")
+    _high(buf, 23, 0, "-" * 79)
+    buf.append(SBA)
+    buf.extend(encode_pack_addr(SDSF_CMD_ROW, SDSF_CMD_SF_COL + 1))
+    buf.append(IC)
+    buf.extend([IAC, EOR])
+    print("TX:", binascii.hexlify(buf))
+    client_socket.sendall(buf)
+
+
+def _sdsf_detail_lines(job: dict) -> list[str]:
+    lines = []
+    lines.append(f"JOB ID       : {job.get('job_id', '')}")
+    lines.append(f"JOB NAME     : {job.get('job_name', '')}")
+    lines.append(f"OWNER        : {job.get('owner', '')}")
+    lines.append(f"STATUS       : {job.get('status', '')}")
+    lines.append(f"RETURN CODE  : {job.get('return_code', '')}")
+    lines.append(f"PID / PGID   : {job.get('pid', '')} / {job.get('pgid', '')}")
+    lines.append(f"SUBMITTED    : {job.get('submitted_at', '')}")
+    lines.append(f"COMPLETED    : {job.get('completed_at', '')}")
+    lines.append(f"SOURCE DSN   : {job.get('source_dsn', '')}")
+    lines.append(f"SOURCE MEMBER: {job.get('source_member', '')}")
+    lines.append(f"RUN DIR      : {job.get('run_dir', '')}")
+    lines.append("")
+
+    metrics = job.get("runtime_metrics", {}) if isinstance(job, dict) else {}
+    lines.append("RUNTIME METRICS")
+    lines.append(f"  CPU %      : {metrics.get('cpu_percent', 'N/A')}")
+    lines.append(f"  MEM BYTES  : {metrics.get('mem_bytes', 'N/A')}")
+    lines.append(f"  IO READ    : {metrics.get('io_read_bytes', 'N/A')}")
+    lines.append(f"  IO WRITE   : {metrics.get('io_write_bytes', 'N/A')}")
+    lines.append("")
+    lines.append("STEP RESULTS")
+    step_results = job.get("step_results", [])
+    if step_results:
+        for item in step_results:
+            lines.append(f"  {item.get('step_name', ''):<8} RC={item.get('rc', '')}")
+    else:
+        lines.append("  NONE")
+    return lines
+
+
+def _view_text_panel_session(client_socket, title: str, lines: list[str]) -> tuple[bool, str]:
+    page = 0
+    message = None
+    while True:
+        send_ispf_text_viewer(client_socket, title=title, lines=lines, page=page, short_msg=message)
+        message = None
+        result = read_client_input(client_socket)
+        if result is None:
+            return True, ""
+
+        aid, cursor_addr, fields = result
+        aid_str = aid_to_string(aid)
+        command = fields.get(SDSF_CMD_ADDR, "").strip().upper()
+
+        if command in {"X", "END", "EXIT", "CANCEL"} or aid_str in ("PF3", "PF15"):
+            return False, ""
+        if aid_str == "PF7" or command in {"UP", "TOP"}:
+            page = 0 if command == "TOP" else max(0, page - 18)
+            continue
+        if aid_str == "PF8" or command in {"DOWN", "BOT", "BOTTOM"}:
+            if command in {"BOT", "BOTTOM"}:
+                page = max(0, len(lines) - 18)
+            else:
+                page = min(max(0, len(lines) - 18), page + 18)
+            continue
+
+        if command:
+            message = f"UNKNOWN COMMAND: {command}"
+
+
+def _sdsf_section_session(client_socket, job_id: str) -> tuple[bool, str]:
+    section_msg = None
+    section_rows = {
+        6: "JESMSG",
+        7: "JCL",
+        8: "SYSOUT",
+        9: "SYSERR",
+        10: "JOBMETA",
+    }
+
+    while True:
+        send_ispf_sdsf_sections(client_socket, job_id=job_id, short_msg=section_msg)
+        section_msg = None
+        result = read_client_input(client_socket)
+        if result is None:
+            return True, ""
+
+        aid, cursor_addr, fields = result
+        aid_str = aid_to_string(aid)
+        command = fields.get(SDSF_CMD_ADDR, "").strip().upper()
+
+        if command in {"X", "END", "EXIT", "CANCEL"} or aid_str in ("PF3", "PF15"):
+            return False, ""
+
+        target_section = ""
+        if command in {"JESMSG", "JCL", "SYSOUT", "SYSERR", "JOBMETA"}:
+            target_section = command
+
+        if not target_section:
+            for row, name in section_rows.items():
+                cmd_addr = row * 80 + (SDSF_LINE_CMD_SF_COL + 1)
+                line_cmd = fields.get(cmd_addr, "").strip().upper()
+                if line_cmd == "S":
+                    target_section = name
+                    break
+                if line_cmd:
+                    section_msg = f"INVALID LINE CMD: {line_cmd}"
+                    break
+
+        if not target_section:
+            if command:
+                section_msg = f"UNKNOWN SECTION: {command}"
+            continue
+
+        sections, sec_err = get_job_sections(job_id)
+        if sec_err:
+            section_msg = sec_err
+            continue
+
+        content = sections.get(target_section, "")
+        if not content:
+            content = f"NO CONTENT FOR {target_section}"
+
+        disconnected, _ = _view_text_panel_session(
+            client_socket,
+            title=f"{job_id} {target_section}",
+            lines=content.splitlines() or [""],
+        )
+        if disconnected:
+            return True, ""
+
+
+def handle_sdsf_session(client_socket, userid: str) -> tuple[bool, str, str]:
+    mode = "ST"
+    pre_filter = "*"
+    owner_filter = userid
+    short_msg = None
+
+    while True:
+        refresh_job_registry()
+        rows = list_jobs(
+            pre_filter=pre_filter,
+            owner_filter=owner_filter,
+            active_only=(mode == "DA"),
+        )
+        send_ispf_sdsf(
+            client_socket,
+            userid=userid,
+            command=mode,
+            pre_filter=pre_filter,
+            owner_filter=owner_filter,
+            rows=rows,
+            short_msg=short_msg,
+        )
+        short_msg = None
+
+        result = read_client_input(client_socket)
+        if result is None:
+            return True, "", ""
+
+        aid, cursor_addr, fields = result
+        aid_str = aid_to_string(aid)
+        cmd_text = fields.get(SDSF_CMD_ADDR, "").strip().upper()
+        entered_pre = fields.get(SDSF_PRE_ADDR, "").strip().upper()
+        entered_owner = fields.get(SDSF_OWNER_ADDR, "").strip().upper()
+
+        for text in (cmd_text, entered_pre, entered_owner):
+            if text.startswith("=") and len(text) > 1:
+                return False, text[1:], ""
+
+        if entered_pre:
+            pre_filter = entered_pre
+        if entered_owner:
+            owner_filter = entered_owner
+
+        if cmd_text in {"X", "END", "EXIT", "CANCEL"} or aid_str in ("PF3", "PF15"):
+            return False, "", ""
+
+        if cmd_text:
+            parts = cmd_text.split()
+            primary = parts[0]
+            operand = " ".join(parts[1:]).strip().upper() if len(parts) > 1 else ""
+            if primary in {"ST", "DA"}:
+                mode = primary
+            elif primary == "PRE" and operand:
+                pre_filter = operand
+            elif primary == "OWNER" and operand:
+                owner_filter = operand
+            elif primary not in {"PRE", "OWNER"}:
+                short_msg = f"UNKNOWN COMMAND: {cmd_text}"
+                continue
+
+        selected = None
+        selected_cmd = ""
+        selected_count = 0
+        for i, job in enumerate(rows[:SDSF_RESULTS_MAX_ROWS]):
+            cmd_addr = (SDSF_RESULTS_FIRST_ROW + i) * 80 + (SDSF_LINE_CMD_SF_COL + 1)
+            line_cmd = fields.get(cmd_addr, "").strip().upper()
+            if not line_cmd:
+                continue
+            selected_count += 1
+            if line_cmd in {"S", "?", "C", "P"} and selected is None:
+                selected = job
+                selected_cmd = line_cmd
+            elif line_cmd not in {"S", "?", "C", "P"}:
+                short_msg = f"INVALID LINE CMD: {line_cmd}"
+                selected = None
+                selected_cmd = ""
+                break
+
+        if selected_count > 1:
+            short_msg = "ENTER ONLY ONE LINE COMMAND"
+            continue
+
+        if selected is None:
+            continue
+
+        job_id = str(selected.get("job_id", "")).strip().upper()
+        if not job_id:
+            short_msg = "MISSING JOB ID"
+            continue
+
+        if selected_cmd == "C":
+            short_msg = cancel_job(job_id)
+            continue
+        if selected_cmd == "P":
+            short_msg = purge_job(job_id)
+            continue
+        if selected_cmd == "S":
+            job, job_err = get_job(job_id)
+            if job_err:
+                short_msg = job_err
+                continue
+            disconnected, _ = _view_text_panel_session(
+                client_socket,
+                title=f"SDSF DETAIL {job_id}",
+                lines=_sdsf_detail_lines(job),
+            )
+            if disconnected:
+                return True, "", ""
+            continue
+        if selected_cmd == "?":
+            disconnected, _ = _sdsf_section_session(client_socket, job_id)
+            if disconnected:
+                return True, "", ""
+            continue
+
+    return False, "", ""
+
+
 def aid_to_string(aid: int):
     aid_codes = {
         0x60: "No AID",
@@ -1417,6 +1871,7 @@ def handle_client(client_socket, addr):
                 continue
 
             userid = userid_raw
+            set_default_submit_owner(userid)
             break
 
         # ISPF menu loop
@@ -1552,6 +2007,13 @@ def handle_client(client_socket, addr):
 
                 if not pending_main_option:
                     short_msg = None
+            elif option == "S":
+                disconnect, jump_option, sdsf_msg = handle_sdsf_session(client_socket, userid)
+                if disconnect:
+                    return
+                if jump_option:
+                    pending_main_option = jump_option
+                short_msg = sdsf_msg
             elif option in valid_opts:
                 short_msg = f"OPTION {option} NOT YET IMPLEMENTED"
             elif option:

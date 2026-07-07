@@ -3,18 +3,220 @@ import os
 import platform
 import re
 import shlex
+import fnmatch
+import shutil
+import signal
 import subprocess
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from app_config import BASE_DIR, JOB_RUNS_DIR
 from utilities.base import UtilityActions, UtilityLayout, UtilityResult
+
+try:
+    import psutil  # type: ignore
+except Exception:
+    psutil = None
 
 
 DEFAULT_RUNTIME_MODE = "native-argv"
 ENV_RUNTIME_MODES = {"gnucobol-env", "dual"}
 VALID_RUNTIME_MODES = {DEFAULT_RUNTIME_MODE, *ENV_RUNTIME_MODES}
 COBOL_MODULE_SUFFIXES = {".so", ".dylib", ".dll"}
+
+SECTION_FILES = {
+    "JESMSG": "JESMSGLG.log",
+    "JCL": "JCL.log",
+    "SYSOUT": "SYSOUT.log",
+    "SYSERR": "SYSERR.log",
+    "JOBMETA": "JOBMETA.json",
+}
+
+_ACTIVE_JOBS: dict[str, dict] = {}
+_JOB_LOCK = threading.Lock()
+_JOB_COUNTER = 0
+_DEFAULT_SUBMIT_OWNER = "UNKNOWN"
+
+
+def set_default_submit_owner(owner: str) -> None:
+    global _DEFAULT_SUBMIT_OWNER
+    _DEFAULT_SUBMIT_OWNER = (owner or "UNKNOWN").strip().upper() or "UNKNOWN"
+
+
+def _iso_now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _extract_job_counter_value(job_id: str) -> int:
+    m = re.match(r"^JOB(\d+)$", str(job_id or "").strip().upper())
+    if not m:
+        return 0
+    try:
+        return int(m.group(1))
+    except Exception:
+        return 0
+
+
+def _next_job_id() -> str:
+    global _JOB_COUNTER
+
+    with _JOB_LOCK:
+        if _JOB_COUNTER == 0:
+            max_seen = 0
+            if JOB_RUNS_DIR.exists():
+                for meta in JOB_RUNS_DIR.glob("*/JOBMETA.json"):
+                    try:
+                        loaded = json.loads(meta.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    if isinstance(loaded, dict):
+                        max_seen = max(max_seen, _extract_job_counter_value(loaded.get("job_id", "")))
+            _JOB_COUNTER = max_seen
+
+        _JOB_COUNTER += 1
+        return f"JOB{_JOB_COUNTER:05d}"
+
+
+def _job_meta_path(run_dir: Path) -> Path:
+    return run_dir / "JOBMETA.json"
+
+
+def _write_jobmeta(run_dir: Path, payload: dict) -> None:
+    _job_meta_path(run_dir).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _read_jobmeta(run_dir: Path) -> dict:
+    meta_path = _job_meta_path(run_dir)
+    if not meta_path.exists() or not meta_path.is_file():
+        return {}
+    try:
+        loaded = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _sample_runtime_metrics(pid: int) -> dict:
+    if not pid or psutil is None:
+        return {}
+
+    try:
+        proc = psutil.Process(pid)
+        mem = proc.memory_info().rss
+        cpu = proc.cpu_percent(interval=0.0)
+        io_data = proc.io_counters() if hasattr(proc, "io_counters") else None
+        read_bytes = int(getattr(io_data, "read_bytes", 0) or 0) if io_data is not None else None
+        write_bytes = int(getattr(io_data, "write_bytes", 0) or 0) if io_data is not None else None
+        return {
+            "cpu_percent": round(float(cpu), 1),
+            "mem_bytes": int(mem),
+            "io_read_bytes": read_bytes,
+            "io_write_bytes": write_bytes,
+        }
+    except Exception:
+        return {}
+
+
+def _prime_process_metrics(proc_obj) -> None:
+    if psutil is None or proc_obj is None:
+        return
+    try:
+        proc_obj.cpu_percent(interval=None)
+        for child in proc_obj.children(recursive=True):
+            try:
+                child.cpu_percent(interval=None)
+            except Exception:
+                continue
+    except Exception:
+        return
+
+
+def _merge_runtime_metrics(previous: dict, current: dict) -> dict:
+    prev = dict(previous or {})
+    cur = dict(current or {})
+    if not cur:
+        return prev
+    if not prev:
+        return cur
+
+    prev_cpu = float(prev.get("cpu_percent", 0.0) or 0.0)
+    cur_cpu = float(cur.get("cpu_percent", 0.0) or 0.0)
+    if cur_cpu <= 0.0 and prev_cpu > 0.0:
+        cur["cpu_percent"] = round(prev_cpu, 1)
+
+    for key in ("mem_bytes", "io_read_bytes", "io_write_bytes"):
+        if cur.get(key) is None and prev.get(key) is not None:
+            cur[key] = prev.get(key)
+
+    return cur
+
+
+def _sample_runtime_metrics_for_state(state: dict) -> dict:
+    if psutil is not None:
+        proc_obj = state.get("ps_proc")
+        if proc_obj is not None:
+            try:
+                if not proc_obj.is_running():
+                    return {}
+                procs = [proc_obj]
+                try:
+                    procs.extend(proc_obj.children(recursive=True))
+                except Exception:
+                    pass
+
+                cpu_total = 0.0
+                mem_total = 0
+                read_total = 0
+                write_total = 0
+                saw_io = False
+                now = time.time()
+                samples = dict(state.get("cpu_samples", {}) or {})
+                new_samples = {}
+
+                for proc in procs:
+                    pid_key = str(getattr(proc, "pid", ""))
+                    try:
+                        cpu_times = proc.cpu_times()
+                        cpu_used = float(getattr(cpu_times, "user", 0.0) or 0.0) + float(getattr(cpu_times, "system", 0.0) or 0.0)
+                        prev = samples.get(pid_key)
+                        if isinstance(prev, dict):
+                            delta_cpu = max(0.0, cpu_used - float(prev.get("cpu_used", 0.0) or 0.0))
+                            delta_wall = max(0.0001, now - float(prev.get("wall", now) or now))
+                            cpu_total += (delta_cpu / delta_wall) * 100.0
+                        new_samples[pid_key] = {"cpu_used": cpu_used, "wall": now}
+                    except Exception:
+                        pass
+                    try:
+                        mem_total += int(proc.memory_info().rss)
+                    except Exception:
+                        pass
+                    try:
+                        io_data = proc.io_counters() if hasattr(proc, "io_counters") else None
+                        if io_data is not None:
+                            read_total += int(getattr(io_data, "read_bytes", 0) or 0)
+                            write_total += int(getattr(io_data, "write_bytes", 0) or 0)
+                            saw_io = True
+                    except Exception:
+                        pass
+
+                state["cpu_samples"] = new_samples
+
+                return {
+                    "cpu_percent": round(float(cpu_total), 1),
+                    "mem_bytes": int(mem_total),
+                    "io_read_bytes": int(read_total) if saw_io else None,
+                    "io_write_bytes": int(write_total) if saw_io else None,
+                }
+            except Exception:
+                pass
+
+    sampled = _sample_runtime_metrics(int(state.get("pid", 0) or 0))
+    if sampled:
+        return sampled
+    return dict(state.get("last_runtime_metrics", {}) or {})
 
 
 def _extract_jump_option(*values: str) -> str:
@@ -443,7 +645,7 @@ def _build_windows_script(steps: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _run_job(job_name: str, script_text: str, is_windows: bool) -> tuple[int, str, str, Path]:
+def _prepare_run_dir(job_name: str) -> tuple[Path, Path]:
     runs_root = JOB_RUNS_DIR
     runs_root.mkdir(parents=True, exist_ok=True)
 
@@ -452,15 +654,107 @@ def _run_job(job_name: str, script_text: str, is_windows: bool) -> tuple[int, st
     run_dir = runs_root / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    script_name = "run_job.bat" if is_windows else "run_job.sh"
-    script_path = run_dir / script_name
+    return run_dir, run_dir / ("run_job.bat" if platform.system().upper().startswith("WIN") else "run_job.sh")
+
+
+def _start_job_async(
+    job_id: str,
+    job_name: str,
+    owner: str,
+    script_text: str,
+    is_windows: bool,
+    source_dsn: str,
+    source_member: str,
+    steps: list[dict],
+    jcl_text: str,
+    actions: UtilityActions,
+    catalog_snapshot: list,
+) -> tuple[Path, int, Optional[int]]:
+    run_dir, script_path = _prepare_run_dir(job_name)
+
     script_path.write_text(script_text, encoding="utf-8")
     if not is_windows:
         script_path.chmod(0o755)
 
+    (run_dir / SECTION_FILES["JCL"]).write_text(jcl_text, encoding="utf-8")
+
+    sysout_path = run_dir / SECTION_FILES["SYSOUT"]
+    syserr_path = run_dir / SECTION_FILES["SYSERR"]
+    stdout_file = sysout_path.open("w", encoding="utf-8")
+    stderr_file = syserr_path.open("w", encoding="utf-8")
+
     cmd = ["cmd.exe", "/c", str(script_path)] if is_windows else ["/bin/bash", str(script_path)]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    return proc.returncode, proc.stdout or "", proc.stderr or "", run_dir
+    popen_kwargs = {
+        "stdout": stdout_file,
+        "stderr": stderr_file,
+        "text": True,
+    }
+    if is_windows:
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(cmd, **popen_kwargs)
+    ps_proc = None
+    if psutil is not None:
+        try:
+            ps_proc = psutil.Process(proc.pid)
+            _prime_process_metrics(ps_proc)
+        except Exception:
+            ps_proc = None
+
+    pgid = None
+    if not is_windows:
+        try:
+            pgid = os.getpgid(proc.pid)
+        except Exception:
+            pgid = None
+
+    submitted_at = _iso_now()
+    base_meta = {
+        "job_id": job_id,
+        "job_name": job_name,
+        "owner": owner,
+        "status": "ACTIVE",
+        "pid": proc.pid,
+        "pgid": pgid,
+        "source_dsn": source_dsn,
+        "source_member": source_member,
+        "step_count": len(steps),
+        "submitted_at": submitted_at,
+        "started_at": submitted_at,
+        "completed_at": None,
+        "return_code": None,
+        "runtime_metrics": {},
+        "run_dir": str(run_dir),
+        "step_results": [],
+    }
+    _write_jobmeta(run_dir, base_meta)
+
+    with _JOB_LOCK:
+        _ACTIVE_JOBS[job_id] = {
+            "job_id": job_id,
+            "job_name": job_name,
+            "owner": owner,
+            "proc": proc,
+            "pid": proc.pid,
+            "pgid": pgid,
+            "run_dir": run_dir,
+            "source_dsn": source_dsn,
+            "source_member": source_member,
+            "steps": steps,
+            "actions": actions,
+            "catalog": list(catalog_snapshot),
+            "submitted_at": submitted_at,
+            "stdout_file": stdout_file,
+            "stderr_file": stderr_file,
+            "ps_proc": ps_proc,
+            "cpu_samples": {},
+            "last_runtime_metrics": {},
+            "status": "ACTIVE",
+        }
+
+    return run_dir, proc.pid, pgid
 
 
 def _extract_step_results(stdout: str) -> list[dict]:
@@ -480,9 +774,23 @@ def _extract_step_results(stdout: str) -> list[dict]:
     return results
 
 
-def _write_spool_files(run_dir: Path, job_name: str, rc: int, stdout: str, stderr: str, source_dsn: str, source_member: str, steps: list[dict]):
-    (run_dir / "SYSOUT.log").write_text(stdout, encoding="utf-8")
-    (run_dir / "SYSERR.log").write_text(stderr, encoding="utf-8")
+def _write_spool_files(
+    run_dir: Path,
+    job_id: str,
+    job_name: str,
+    owner: str,
+    status: str,
+    rc: int,
+    source_dsn: str,
+    source_member: str,
+    steps: list[dict],
+    pid: int,
+    pgid: Optional[int],
+    submitted_at: str,
+    runtime_metrics: Optional[dict] = None,
+):
+    stdout = (run_dir / SECTION_FILES["SYSOUT"]).read_text(encoding="utf-8") if (run_dir / SECTION_FILES["SYSOUT"]).exists() else ""
+    stderr = (run_dir / SECTION_FILES["SYSERR"]).read_text(encoding="utf-8") if (run_dir / SECTION_FILES["SYSERR"]).exists() else ""
 
     step_results = _extract_step_results(stdout)
     jes_lines = [
@@ -497,19 +805,325 @@ def _write_spool_files(run_dir: Path, job_name: str, rc: int, stdout: str, stder
     else:
         for step in steps:
             jes_lines.append(f"  {step.get('step_name', 'STEP'):<8} RC=UNKNOWN")
-    (run_dir / "JESMSGLG.log").write_text("\n".join(jes_lines) + "\n", encoding="utf-8")
+    (run_dir / SECTION_FILES["JESMSG"]).write_text("\n".join(jes_lines) + "\n", encoding="utf-8")
 
     summary = {
+        "job_id": job_id,
         "job_name": job_name,
+        "owner": owner,
+        "status": status,
+        "pid": pid,
+        "pgid": pgid,
         "return_code": rc,
         "source_dsn": source_dsn,
         "source_member": source_member,
         "step_count": len(steps),
         "step_results": step_results,
         "run_dir": str(run_dir),
-        "completed_at": datetime.now().isoformat(timespec="seconds"),
+        "submitted_at": submitted_at,
+        "completed_at": _iso_now(),
+        "runtime_metrics": runtime_metrics or {},
     }
-    (run_dir / "JOBMETA.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    _write_jobmeta(run_dir, summary)
+
+
+def _finalize_completed_jobs() -> None:
+    finished: list[tuple[str, dict, int]] = []
+    with _JOB_LOCK:
+        for job_id, state in list(_ACTIVE_JOBS.items()):
+            proc = state.get("proc")
+            rc = proc.poll() if proc is not None else 16
+            if rc is None:
+                continue
+            finished.append((job_id, state, int(rc)))
+            del _ACTIVE_JOBS[job_id]
+
+    for job_id, state, rc in finished:
+        stdout_file = state.get("stdout_file")
+        stderr_file = state.get("stderr_file")
+        try:
+            if stdout_file is not None:
+                stdout_file.flush()
+                stdout_file.close()
+        except Exception:
+            pass
+        try:
+            if stderr_file is not None:
+                stderr_file.flush()
+                stderr_file.close()
+        except Exception:
+            pass
+
+        status = "COMPLETE" if rc == 0 else "FAILED"
+        if state.get("status") == "CANCELED":
+            status = "CANCELED"
+
+        final_metrics = _merge_runtime_metrics(
+            dict(state.get("last_runtime_metrics", {}) or {}),
+            _sample_runtime_metrics_for_state(state),
+        )
+        if not final_metrics:
+            persisted = _read_jobmeta(state.get("run_dir")) if state.get("run_dir") is not None else {}
+            final_metrics = dict(persisted.get("runtime_metrics", {}) or {})
+
+        _write_spool_files(
+            run_dir=state.get("run_dir"),
+            job_id=job_id,
+            job_name=state.get("job_name", "JOB"),
+            owner=state.get("owner", "UNKNOWN"),
+            status=status,
+            rc=rc,
+            source_dsn=state.get("source_dsn", ""),
+            source_member=state.get("source_member", ""),
+            steps=state.get("steps", []),
+            pid=int(state.get("pid", 0) or 0),
+            pgid=state.get("pgid"),
+            submitted_at=state.get("submitted_at", _iso_now()),
+            runtime_metrics=final_metrics,
+        )
+
+        if rc == 0:
+            actions = state.get("actions")
+            catalog = state.get("catalog", [])
+            steps = state.get("steps", [])
+            if actions is not None:
+                try:
+                    _sync_catalog_for_dispositions(actions, catalog, steps)
+                except Exception:
+                    pass
+
+
+def refresh_job_registry() -> None:
+    with _JOB_LOCK:
+        active_snapshot = list(_ACTIVE_JOBS.values())
+
+    for state in active_snapshot:
+        run_dir = state.get("run_dir")
+        if run_dir is None:
+            continue
+        live_metrics = _merge_runtime_metrics(
+            dict(state.get("last_runtime_metrics", {}) or {}),
+            _sample_runtime_metrics_for_state(state),
+        )
+        if live_metrics:
+            state["last_runtime_metrics"] = dict(live_metrics)
+        existing = _read_jobmeta(run_dir)
+        if not existing:
+            continue
+        existing["runtime_metrics"] = dict(state.get("last_runtime_metrics", {}) or {})
+        existing["status"] = state.get("status", existing.get("status", "ACTIVE"))
+        _write_jobmeta(run_dir, existing)
+
+    _finalize_completed_jobs()
+
+
+def _read_all_jobmeta() -> dict[str, dict]:
+    jobs: dict[str, dict] = {}
+    if not JOB_RUNS_DIR.exists():
+        return jobs
+
+    for run_dir in JOB_RUNS_DIR.iterdir():
+        if not run_dir.is_dir():
+            continue
+        meta = _read_jobmeta(run_dir)
+        if not meta:
+            continue
+        job_id = str(meta.get("job_id", "")).strip().upper()
+        if not job_id:
+            continue
+        jobs[job_id] = meta
+    return jobs
+
+
+def list_jobs(pre_filter: str = "", owner_filter: str = "", active_only: bool = False) -> list[dict]:
+    refresh_job_registry()
+    jobs = _read_all_jobmeta()
+
+    with _JOB_LOCK:
+        active_ids = set(_ACTIVE_JOBS.keys())
+
+    for job_id, meta in jobs.items():
+        if str(meta.get("status", "")).upper() != "ACTIVE":
+            continue
+        if job_id in active_ids:
+            continue
+
+        pid = int(meta.get("pid", 0) or 0)
+        running = False
+        if pid > 0:
+            try:
+                if psutil is not None:
+                    running = psutil.pid_exists(pid)
+                else:
+                    os.kill(pid, 0)
+                    running = True
+            except Exception:
+                running = False
+
+        if not running:
+            meta["status"] = "ENDED"
+
+    with _JOB_LOCK:
+        for job_id, state in _ACTIVE_JOBS.items():
+            metrics = _sample_runtime_metrics_for_state(state)
+            jobs[job_id] = {
+                "job_id": job_id,
+                "job_name": state.get("job_name", "JOB"),
+                "owner": state.get("owner", "UNKNOWN"),
+                "status": state.get("status", "ACTIVE"),
+                "pid": state.get("pid"),
+                "pgid": state.get("pgid"),
+                "return_code": None,
+                "source_dsn": state.get("source_dsn", ""),
+                "source_member": state.get("source_member", ""),
+                "step_count": len(state.get("steps", [])),
+                "step_results": [],
+                "submitted_at": state.get("submitted_at"),
+                "completed_at": None,
+                "runtime_metrics": metrics,
+                "run_dir": str(state.get("run_dir")),
+            }
+
+    pre = (pre_filter or "*").strip().upper() or "*"
+    owner = (owner_filter or "*").strip().upper() or "*"
+
+    rows = []
+    for meta in jobs.values():
+        status = str(meta.get("status", "")).upper()
+        if active_only and status not in {"ACTIVE", "STARTING", "CANCELING"}:
+            continue
+
+        job_name = str(meta.get("job_name", "")).upper()
+        job_id = str(meta.get("job_id", "")).upper()
+        owner_value = str(meta.get("owner", "")).upper()
+
+        if not (fnmatch.fnmatchcase(job_name, pre) or fnmatch.fnmatchcase(job_id, pre)):
+            continue
+        if not fnmatch.fnmatchcase(owner_value, owner):
+            continue
+
+        rows.append(meta)
+
+    def _sort_key(item: dict):
+        submitted = str(item.get("submitted_at", ""))
+        return (submitted, str(item.get("job_id", "")))
+
+    rows.sort(key=_sort_key, reverse=True)
+    return rows
+
+
+def get_job(job_id: str) -> tuple[dict, str]:
+    refresh_job_registry()
+    target = str(job_id or "").strip().upper()
+    if not target:
+        return {}, "ENTER JOB ID"
+
+    with _JOB_LOCK:
+        state = _ACTIVE_JOBS.get(target)
+        if state is not None:
+            metrics = _sample_runtime_metrics_for_state(state)
+            return {
+                "job_id": target,
+                "job_name": state.get("job_name", "JOB"),
+                "owner": state.get("owner", "UNKNOWN"),
+                "status": state.get("status", "ACTIVE"),
+                "pid": state.get("pid"),
+                "pgid": state.get("pgid"),
+                "return_code": None,
+                "source_dsn": state.get("source_dsn", ""),
+                "source_member": state.get("source_member", ""),
+                "step_count": len(state.get("steps", [])),
+                "step_results": [],
+                "submitted_at": state.get("submitted_at"),
+                "completed_at": None,
+                "runtime_metrics": metrics,
+                "run_dir": str(state.get("run_dir")),
+            }, ""
+
+    for meta in _read_all_jobmeta().values():
+        if str(meta.get("job_id", "")).strip().upper() == target:
+            return meta, ""
+
+    return {}, f"JOB NOT FOUND: {target}"
+
+
+def get_job_sections(job_id: str) -> tuple[dict, str]:
+    meta, err = get_job(job_id)
+    if err:
+        return {}, err
+
+    run_dir = Path(str(meta.get("run_dir", "")).strip())
+    if not run_dir.exists() or not run_dir.is_dir():
+        return {}, "RUN DIRECTORY NOT FOUND"
+
+    out = {}
+    for name, file_name in SECTION_FILES.items():
+        path = run_dir / file_name
+        if not path.exists() or not path.is_file():
+            out[name] = ""
+            continue
+        try:
+            out[name] = path.read_text(encoding="utf-8")
+        except Exception as e:
+            out[name] = f"UNABLE TO READ SECTION {name}: {e}"
+    return out, ""
+
+
+def cancel_job(job_id: str) -> str:
+    refresh_job_registry()
+    target = str(job_id or "").strip().upper()
+    if not target:
+        return "ENTER JOB ID"
+
+    with _JOB_LOCK:
+        state = _ACTIVE_JOBS.get(target)
+
+    if state is None:
+        return f"JOB {target} IS NOT ACTIVE"
+
+    proc = state.get("proc")
+    if proc is None:
+        return f"JOB {target} PROCESS NOT FOUND"
+
+    try:
+        if platform.system().upper().startswith("WIN"):
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, text=True)
+        else:
+            pgid = state.get("pgid")
+            if pgid:
+                os.killpg(int(pgid), signal.SIGTERM)
+            else:
+                proc.terminate()
+    except Exception as e:
+        return f"CANCEL FAILED FOR {target}: {e}"
+
+    state["status"] = "CANCELED"
+    return f"CANCEL REQUESTED FOR {target}"
+
+
+def purge_job(job_id: str) -> str:
+    refresh_job_registry()
+    target = str(job_id or "").strip().upper()
+    if not target:
+        return "ENTER JOB ID"
+
+    with _JOB_LOCK:
+        if target in _ACTIVE_JOBS:
+            return f"JOB {target} IS ACTIVE - CANCEL FIRST"
+
+    meta, err = get_job(target)
+    if err:
+        return err
+
+    run_dir = Path(str(meta.get("run_dir", "")).strip())
+    if not run_dir.exists() or not run_dir.is_dir():
+        return f"RUN DIRECTORY NOT FOUND FOR {target}"
+
+    try:
+        shutil.rmtree(run_dir)
+    except Exception as e:
+        return f"PURGE FAILED FOR {target}: {e}"
+    return f"PURGED {target}"
 
 
 def _resolve_dd_paths(actions: UtilityActions, catalog: list, step: dict, known_new_dsns: set[str]) -> tuple[dict, str]:
@@ -602,9 +1216,12 @@ def _sync_catalog_for_dispositions(actions: UtilityActions, catalog: list, steps
         actions.save_catalog(catalog)
 
 
-def submit_jcl(actions: UtilityActions, jcl_dsn: str, jcl_member: str = "") -> str:
+def submit_jcl(actions: UtilityActions, jcl_dsn: str, jcl_member: str = "", owner: str = "") -> str:
+    refresh_job_registry()
+
     norm_dsn = actions.normalize_dsn(jcl_dsn)
     member = str(jcl_member or "").strip().upper()
+    owner_id = (owner or _DEFAULT_SUBMIT_OWNER or "UNKNOWN").strip().upper() or "UNKNOWN"
 
     if not norm_dsn:
         return "ENTER JCL DATA SET NAME"
@@ -645,16 +1262,27 @@ def submit_jcl(actions: UtilityActions, jcl_dsn: str, jcl_member: str = "") -> s
         step["runtime_mode"] = _resolve_runtime_mode(pgm_path)
 
     script_text = _build_windows_script(steps) if is_windows else _build_bash_script(steps)
+    job_id = _next_job_id()
 
     try:
-        rc, stdout, stderr, run_dir = _run_job(job_name, script_text, is_windows)
-        _write_spool_files(run_dir, job_name, rc, stdout, stderr, norm_dsn, member, steps)
-        if rc == 0:
-            _sync_catalog_for_dispositions(actions, catalog, steps)
+        run_dir, pid, pgid = _start_job_async(
+            job_id=job_id,
+            job_name=job_name,
+            owner=owner_id,
+            script_text=script_text,
+            is_windows=is_windows,
+            source_dsn=norm_dsn,
+            source_member=member,
+            steps=steps,
+            jcl_text=jcl_text,
+            actions=actions,
+            catalog_snapshot=catalog,
+        )
     except Exception as e:
         return f"JOB EXECUTION FAILED: {e}"
 
-    return f"JOB {job_name} SUBMITTED - COMPLETE RC={rc} RUN={run_dir.name}"
+    pgid_text = f" PGID={pgid}" if pgid is not None else ""
+    return f"JOB {job_name} SUBMITTED ID={job_id} STATUS=ACTIVE PID={pid}{pgid_text} RUN={run_dir.name}"
 
 
 def handle_jcl_submit(client_socket, actions: UtilityActions, layout: UtilityLayout) -> UtilityResult:

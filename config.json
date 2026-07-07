@@ -1,5 +1,5 @@
 {
   "catalog_path": "catalog.json",
   "text_encoding": "cp037",
-  "job_runs_path": "../open-ispf-job-runs"
+  "job_runs_path": "job-runs"
 }
