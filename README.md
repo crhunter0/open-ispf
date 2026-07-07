@@ -83,12 +83,14 @@ Global settings are loaded from config.json:
 ```json
 {
 	"catalog_path": "catalog.json",
-	"text_encoding": "cp037"
+	"text_encoding": "cp037",
+	"job_runs_path": "job_runs"
 }
 ```
 
 - catalog_path: path to the dataset catalog file.
 - text_encoding: default text CCSID for panel/data text conversions.
+- job_runs_path: directory where JCL run artifacts (SYSOUT/SYSERR/JESMSGLG/JOBMETA and run scripts) are written.
 
 If config.json is missing or invalid, safe defaults are used.
 

@@ -1,5 +1,0 @@
-JCL emulator runtime started
-STEP STEP1 EXEC PGM=COBMOD
-PGM NOT FOUND OR NOT EXECUTABLE: COBMOD
-__STEP_RC__|STEP1|12
-JCL emulator runtime complete RC=12

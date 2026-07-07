@@ -1,8 +1,0 @@
-JCL emulator runtime started
-STEP STEP1 EXEC PGM=COBMOD
-COBCRUN MOD=COBMOD
-ENV SYSIN=/Users/chrishunter/vscode-workspace/open-ispf/data/GP5CRH/DATA.dat
-ENV COB_LIBRARY_PATH=/Users/chrishunter/vscode-workspace/open-ispf/data/SYS1/LOADLIB
-ARGS --dd SYSIN|GP5CRH.DATA|SHR||/Users/chrishunter/vscode-workspace/open-ispf/data/GP5CRH/DATA.dat
-__STEP_RC__|STEP1|0
-JCL emulator runtime complete RC=0

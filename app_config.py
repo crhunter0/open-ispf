@@ -7,6 +7,7 @@ CONFIG_FILE = BASE_DIR / "config.json"
 DEFAULT_GLOBAL_CONFIG = {
     "catalog_path": "catalog.json",
     "text_encoding": "cp037",
+    "job_runs_path": "job_runs",
 }
 
 
@@ -43,3 +44,4 @@ def resolve_config_path(path_value: str, default_name: str) -> Path:
 
 TEXT_ENCODING = str(GLOBAL_CONFIG.get("text_encoding", "cp037"))
 CATALOG_FILE = resolve_config_path(str(GLOBAL_CONFIG.get("catalog_path", "catalog.json")), "catalog.json")
+JOB_RUNS_DIR = resolve_config_path(str(GLOBAL_CONFIG.get("job_runs_path", "job_runs")), "job_runs")

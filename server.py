@@ -2,6 +2,7 @@ import socket
 import binascii
 import json
 import fnmatch
+import argparse
 from pathlib import Path
 from datetime import datetime
 from enum import Enum
@@ -11,18 +12,19 @@ from utilities.dslist import edit_dataset_by_name
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "config.json"
+CONFIG_BASE_DIR = BASE_DIR
 DEFAULT_GLOBAL_CONFIG = {
     "catalog_path": "catalog.json",
     "text_encoding": "cp037",
 }
 
 
-def load_global_config() -> dict:
-    if not CONFIG_FILE.exists():
+def load_global_config(config_file: Path) -> dict:
+    if not config_file.exists():
         return dict(DEFAULT_GLOBAL_CONFIG)
 
     try:
-        loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        loaded = json.loads(config_file.read_text(encoding="utf-8"))
         if not isinstance(loaded, dict):
             print("Config load warning: config.json root must be an object; using defaults")
             return dict(DEFAULT_GLOBAL_CONFIG)
@@ -35,17 +37,36 @@ def load_global_config() -> dict:
     return merged
 
 
-GLOBAL_CONFIG = load_global_config()
-
-
 def _resolve_config_path(path_value: str, default_name: str) -> Path:
     cleaned = (path_value or "").strip()
     if not cleaned:
         cleaned = default_name
     candidate = Path(cleaned)
     if not candidate.is_absolute():
-        candidate = BASE_DIR / candidate
+        candidate = CONFIG_BASE_DIR / candidate
     return candidate
+
+
+def _configure_runtime(config_override: str = "") -> None:
+    global CONFIG_FILE
+    global CONFIG_BASE_DIR
+    global GLOBAL_CONFIG
+    global STANDARD_TEXT_CCSID
+    global CATALOG_FILE
+
+    override = str(config_override or "").strip()
+    if override:
+        candidate = Path(override)
+        if not candidate.is_absolute():
+            candidate = BASE_DIR / candidate
+        CONFIG_FILE = candidate
+    else:
+        CONFIG_FILE = BASE_DIR / "config.json"
+
+    CONFIG_BASE_DIR = CONFIG_FILE.parent
+    GLOBAL_CONFIG = load_global_config(CONFIG_FILE)
+    STANDARD_TEXT_CCSID = str(GLOBAL_CONFIG.get("text_encoding", "cp037"))
+    CATALOG_FILE = _resolve_config_path(str(GLOBAL_CONFIG.get("catalog_path", "catalog.json")), "catalog.json")
 
 
 def to_ebcdic(s: str) -> bytes:
@@ -272,8 +293,10 @@ DATASET_EDIT_TEXT_WIDTH = 72
 # Catalog — maps mainframe DSN to local file metadata.
 # Dataset bytes are always stored raw; no whole-dataset transcoding is performed.
 # CP037 is used only at UI/terminal text field boundaries.
-STANDARD_TEXT_CCSID = str(GLOBAL_CONFIG.get("text_encoding", "cp037"))
-CATALOG_FILE = _resolve_config_path(str(GLOBAL_CONFIG.get("catalog_path", "catalog.json")), "catalog.json")
+GLOBAL_CONFIG = {}
+STANDARD_TEXT_CCSID = "cp037"
+CATALOG_FILE = BASE_DIR / "catalog.json"
+_configure_runtime("")
 
 
 def _normalize_dsn(dsn: str) -> str:
@@ -1556,4 +1579,12 @@ def run_tn3270_server(host="0.0.0.0", port=2323):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Open-ISPF TN3270 server")
+    parser.add_argument(
+        "--config",
+        default="",
+        help="Path to config JSON file (defaults to ./config.json)",
+    )
+    args = parser.parse_args()
+    _configure_runtime(args.config)
     run_tn3270_server()

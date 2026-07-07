@@ -7,7 +7,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from app_config import BASE_DIR
+from app_config import BASE_DIR, JOB_RUNS_DIR
 from utilities.base import UtilityActions, UtilityLayout, UtilityResult
 
 
@@ -444,7 +444,7 @@ def _build_windows_script(steps: list[dict]) -> str:
 
 
 def _run_job(job_name: str, script_text: str, is_windows: bool) -> tuple[int, str, str, Path]:
-    runs_root = BASE_DIR / "job_runs"
+    runs_root = JOB_RUNS_DIR
     runs_root.mkdir(parents=True, exist_ok=True)
 
     now = datetime.now().strftime("%Y%m%d%H%M%S")
