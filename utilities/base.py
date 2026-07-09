@@ -14,6 +14,10 @@ class UtilityLayout:
     movecopy_from_member_addr: int
     movecopy_to_dsn_addr: int
     movecopy_to_member_addr: int
+    jcl_option_addr: int
+    jcl_dsn_addr: int
+    jcl_member_addr: int
+    dslist_cmd_addr: int
     dslist_level_addr: int
     dslist_results_first_row: int
     dslist_results_max_rows: int
@@ -33,6 +37,7 @@ class UtilityLayout:
 class UtilityActions:
     send_ispf_dsutil: Callable[..., None]
     send_ispf_movecopy: Callable[..., None]
+    send_ispf_jcl_submit: Callable[..., None]
     send_ispf_dslist: Callable[..., None]
     send_dataset_panel: Callable[..., None]
     read_client_input: Callable[[Any], Any]

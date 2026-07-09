@@ -1,41 +1,6 @@
 {
   "datasets": [
-    {
-      "dsn": "IBMUSER.CLIST",
-      "path": "data/IBMUSER/CLIST",
-      "org": "PO",
-      "recfm": "FB",
-      "lrecl": 80,
-      "content_mode": "text",
-      "text_ccsid": "cp037"
-    },
-    {
-      "dsn": "IBMUSER.JCLLIB",
-      "path": "data/IBMUSER/JCLLIB",
-      "org": "PO",
-      "recfm": "FB",
-      "lrecl": 80,
-      "content_mode": "text",
-      "text_ccsid": "cp037"
-    },
-    {
-      "dsn": "IBMUSER.LOAD",
-      "path": "data/IBMUSER/LOAD",
-      "org": "PO",
-      "recfm": "U",
-      "lrecl": 0,
-      "content_mode": "binary",
-      "text_ccsid": "cp037"
-    },
-    {
-      "dsn": "IBMUSER.PROCLIB",
-      "path": "data/IBMUSER/PROCLIB",
-      "org": "PO",
-      "recfm": "FB",
-      "lrecl": 80,
-      "content_mode": "text",
-      "text_ccsid": "cp037"
-    },
+        
     {
       "dsn": "TESTUSER.DATA",
       "path": "data/TESTUSER/DATA.dat",
@@ -73,54 +38,18 @@
       "text_ccsid": "cp037"
     },
     {
-      "dsn": "GP5CRH.DATA",
-      "path": "data/GP5CRH/DATA.dat",
-      "org": "PS",
-      "recfm": "FB",
-      "lrecl": 80,
-      "content_mode": "text",
-      "text_ccsid": "cp037"
-    },
-    {
-      "dsn": "GP5CRH.NEWFILE",
-      "path": "data/GP5CRH/NEWFILE.dat",
-      "org": "PS",
-      "recfm": "FB",
-      "lrecl": 80,
-      "content_mode": "text",
-      "text_ccsid": "cp037"
-    },
-    {
-      "dsn": "GP5CRH.DATA.COPY",
-      "path": "data/GP5CRH/DATA_COPY.dat",
-      "org": "PS",
-      "recfm": "FB",
-      "lrecl": 80,
-      "content_mode": "text",
-      "text_ccsid": "cp037"
-    },
-    {
-      "dsn": "GP5CRH.JCLLIB",
-      "path": "data/GP5CRH/JCLLIB",
+      "dsn": "SYS1.LOADLIB",
+      "path": "data/SYS1/LOADLIB",
       "org": "PO",
-      "recfm": "FB",
-      "lrecl": 80,
-      "content_mode": "text",
+      "recfm": "U",
+      "lrecl": 0,
+      "content_mode": "binary",
       "text_ccsid": "cp037"
     },
     {
-      "dsn": "GP5CRH.TEST.NEW.FLAT",
-      "path": "data/GP5CRH/TEST_NEW_FLAT.dat",
+      "dsn": "TESTUSER.STALECHK",
+      "path": "data/TESTUSER/STALECHK.dat",
       "org": "PS",
-      "recfm": "FB",
-      "lrecl": 80,
-      "content_mode": "text",
-      "text_ccsid": "cp037"
-    },
-    {
-      "dsn": "GP5CRH.TEST.NEW.PDS",
-      "path": "data/GP5CRH/TEST_NEW_PDS",
-      "org": "PO",
       "recfm": "FB",
       "lrecl": 80,
       "content_mode": "text",

@@ -1,4 +1,5 @@
 {
   "catalog_path": "catalog.json",
-  "text_encoding": "cp037"
+  "text_encoding": "cp037",
+  "job_runs_path": "job-runs"
 }

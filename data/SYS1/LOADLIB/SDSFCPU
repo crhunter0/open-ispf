@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+seconds=45
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --parm)
+      shift
+      if [[ $# -gt 0 ]]; then
+        raw="${1//\'/}"
+        if [[ "$raw" =~ ^[0-9]+$ ]]; then
+          seconds="$raw"
+        fi
+      fi
+      ;;
+  esac
+  shift || true
+done
+
+echo "SDSFCPU: START pid=$$ seconds=$seconds"
+end=$((SECONDS + seconds))
+count=0
+while (( SECONDS < end )); do
+  count=$((count + 1))
+  # Busy math loop to keep CPU active for metric visibility.
+  count=$(( (count * 1103515245 + 12345) & 2147483647 ))
+done
+
+echo "SDSFCPU: COMPLETE iterations=$count"

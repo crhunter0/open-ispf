@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+seconds=60
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --parm)
+      shift
+      if [[ $# -gt 0 ]]; then
+        raw="${1//\'/}"
+        if [[ "$raw" =~ ^[0-9]+$ ]]; then
+          seconds="$raw"
+        fi
+      fi
+      ;;
+  esac
+  shift || true
+done
+
+echo "SDSFWAIT: START pid=$$ seconds=$seconds"
+for ((i=1; i<=seconds; i++)); do
+  if (( i % 5 == 0 )); then
+    echo "SDSFWAIT: elapsed=${i}s"
+  fi
+  sleep 1
+done
+echo "SDSFWAIT: COMPLETE"
