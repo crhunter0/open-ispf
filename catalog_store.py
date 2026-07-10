@@ -57,6 +57,27 @@ def load_dataset_lines(entry: dict) -> tuple[list, str]:
         return [], "BINARY DATA SET NOT SUPPORTED YET"
 
     text_ccsid = str(entry.get("text_ccsid", TEXT_ENCODING)).strip() or TEXT_ENCODING
+    recfm = str(entry.get("recfm", "")).strip().upper()
+    is_fixed = recfm in {"F", "FB"}
+    try:
+        lrecl = int(entry.get("lrecl", 0))
+    except Exception:
+        lrecl = 0
+
+    if is_fixed and lrecl > 0:
+        lines = []
+        try:
+            for offset in range(0, len(raw), lrecl):
+                record = raw[offset: offset + lrecl]
+                if not record:
+                    continue
+                if len(record) < lrecl:
+                    record = record.ljust(lrecl, b" ")
+                lines.append(record.decode(text_ccsid))
+        except Exception as e:
+            return [], f"CCSID DECODE ERROR ({text_ccsid}): {e}"
+        return lines, None
+
     try:
         text = raw.decode(text_ccsid)
     except Exception as e:
@@ -74,9 +95,27 @@ def save_dataset_lines(entry: dict, lines: list) -> str:
         return "DATA SET FILE NOT FOUND"
 
     text_ccsid = str(entry.get("text_ccsid", TEXT_ENCODING)).strip() or TEXT_ENCODING
-    text = "\n".join(lines)
+    recfm = str(entry.get("recfm", "")).strip().upper()
+    is_fixed = recfm in {"F", "FB"}
     try:
-        payload = text.encode(text_ccsid)
+        lrecl = int(entry.get("lrecl", 0))
+    except Exception:
+        lrecl = 0
+
+    try:
+        if is_fixed and lrecl > 0:
+            records = []
+            for line in lines:
+                record = str(line).encode(text_ccsid)
+                if len(record) < lrecl:
+                    record = record + (b" " * (lrecl - len(record)))
+                elif len(record) > lrecl:
+                    record = record[:lrecl]
+                records.append(record)
+            payload = b"".join(records)
+        else:
+            text = "\n".join(lines)
+            payload = text.encode(text_ccsid)
         file_path.write_bytes(payload)
     except Exception as e:
         return f"SAVE FAILED: {e}"
